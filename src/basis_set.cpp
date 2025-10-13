@@ -78,7 +78,7 @@ BasisSet BasisSet::construct_from_gbs(const std::string& filename){
             std::string type;
             size_t num_primitives;
             iss >> type >> num_primitives;
-
+            
 
             if(type.length() == 1){ // S, P, D, F, ...
                 ContractedGauss contracted_gauss(type);
