@@ -1,0 +1,1 @@
+/usr/bin/nvcc -forward-unknown-to-host-compiler -O3 -DNDEBUG -arch=native -Xcompiler=-fPIC -Wno-deprecated-gpu-targets -shared -dlink --options-file CMakeFiles/dftgrid.dir/deviceObjects1.rsp -o CMakeFiles/dftgrid.dir/cmake_device_link.o --options-file CMakeFiles/dftgrid.dir/deviceLinkLibs.rsp -L"/lib/x86_64-linux-gnu"

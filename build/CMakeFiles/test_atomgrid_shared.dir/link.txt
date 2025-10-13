@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG CMakeFiles/test_atomgrid_shared.dir/test_atomgrid4.cpp.o -o bin/test_atomgrid_shared  -ldftgrid_shared 
