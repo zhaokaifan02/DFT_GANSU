@@ -59,7 +59,7 @@ set_target_properties(dftAO_static PROPERTIES
 add_library(dftAO SHARED ${DFTAO_SOURCES})
 target_include_directories(dftAO PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(dftAO PRIVATE Eigen3::Eigen CUDA::cudart CUDA::cublas CUDA::cusolver)
-set_target_properties(dfAO PROPERTIES
+set_target_properties(dftAO PROPERTIES
   CUDA_SEPARABLE_COMPILATION ON
   POSITION_INDEPENDENT_CODE ON
   CUDA_RUNTIME_LIBRARY Shared
