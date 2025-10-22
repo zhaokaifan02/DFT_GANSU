@@ -16,4 +16,6 @@
 
 namespace chemgrid {
     void gen_grid(std::string tag);
+    void gen_grid_screen(std::string tag);
+    
 }

@@ -16,7 +16,8 @@ def init_grid(mol, grid_add, level=3):
     grids.level = level
     grids.build()
     m_grid = "./build/bin/" + grid_add + "_grid.txt"
-    m_ao = "./build/bin/" + grid_add + "_AO.txt"
+    m_ao = "./build/bin/" + grid_add + "_SCREEN_AO.txt"
+
     data = np.loadtxt(m_grid)
     atm_idx_c = data[:, 0].astype(np.int32)
     coords_c = data[:, 1:4]

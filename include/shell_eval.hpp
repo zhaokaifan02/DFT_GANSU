@@ -8,76 +8,6 @@
 #include "types.hpp"     // Atom, Coordinate, AngularMomentums, angstrom_to_bohr
 #include "basis_set.hpp" // BasisSet, ElementBasisSet, ContractedGauss
 
-struct PrimitiveEntry
-{
-    double exponent;
-    double coefficient;
-};
-
-struct ShellEval
-{
-    int l;                                    // 角动量 (0=s,1=p,2=d,…)
-    int nprim;                                // primitive 个数
-    int nctr;                                 // 收缩列个数（一般=1；SP已拆壳也=1）
-    gansu::Coordinate center;                 // 原子坐标(Bohr)
-    std::vector<double> alpha;                // [nprim]
-    std::vector<std::vector<double>> coeff;   // [nctr][nprim]
-    std::vector<std::array<int, 3>> cart_xyz; // 笛卡尔 (lx,ly,lz) 列表
-    int atom_index;
-    size_t ao_base; // 全局 AO 起始行
-};
-struct MoleculeAtom
-{
-    int Z;
-    double x, y, z;
-};
-// 简单 primitive 归一化（s壳正确；高l后续可替换成精确式）
-inline double gto_norm_s_like(int /*l*/, double alpha)
-{
-    return std::pow(2.0 * alpha / M_PI, 0.75);
-}
-
-inline double dfact(int n)
-{ // double factorial: (-1)!! = 1, 0!! = 1, 1!! = 1, 3!! = 3*1, ...
-    if (n <= 0)
-        return 1.0;
-    double v = 1.0;
-    for (int k = n; k > 1; k -= 2)
-        v *= k;
-    return v;
-}
-
-// Normalization for Cartesian primitive: x^lx y^ly z^lz * exp(-alpha r^2)
-// N = (2α/π)^{3/4} * sqrt( (4α)^{L} / [(2lx-1)!! (2ly-1)!! (2lz-1)!!] )
-inline double norm_cart_primitive(int lx, int ly, int lz, double alpha)
-{
-    const int L = lx + ly + lz;
-    const double two_alpha = 2.0 * alpha;
-    const double pref = std::pow(two_alpha / M_PI, 0.75);
-    const double num = std::pow(4.0 * alpha, L);
-    const double den = dfact(2 * lx - 1) * dfact(2 * ly - 1) * dfact(2 * lz - 1);
-    return pref * std::sqrt(num / den);
-}
-
-std::vector<ShellEval>
-instantiate_for_molecule(const gansu::BasisSet &bs,
-                         const std::vector<gansu::Atom> &atoms,
-                         bool normalize_primitives = true,
-                         double coeff_prune_tol = 1e-12);
-
-void eval_ao_cart_cpu(const std::vector<ShellEval> &shells,
-                      const double *gx, const double *gy, const double *gz,
-                      int ngrid,
-                      double *ao /* size = nao*ngrid */);
-
-void build_pyscf_like_tables(
-    std::vector<MoleculeAtom> &atoms,
-    const gansu::BasisSet &bs,
-    std::vector<int> &atm,
-    std::vector<int> &bas,
-    std::vector<double> &env,
-    std::vector<int> &ao_loc);
-
 static inline void cartesian_triples_for_l(int l, std::vector<std::tuple<int, int, int>> &out)
 {
     out.clear();
@@ -111,7 +41,6 @@ static inline double prim_norm_cart(double alpha, int l)
     const double den = std::sqrt(M_PI) * df;
     return std::sqrt(num / den);
 }
-
 static inline void normalize_contracted_cart(
     int l,
     std::vector<double> &exps,
@@ -343,6 +272,120 @@ static inline void evaluate_AO_on_grid(
         }
     }
 }
+
+inline std::vector<uint8_t> build_screen_index_no_omp(
+    const std::vector<AODesc> &aos,
+    const std::vector<std::array<double, 3>> &atm_coords, // Bohr
+    const std::vector<std::array<double, 3>> &grid,       // AoS (G×3)
+    int blksize = 56,                                     // 建议 64/128/256
+    int nbins   = 100,                                    // 建议 32~128
+    double cutoff = 1e-15                                 // >0，且别太离谱
+)
+{
+    // ---- 基本合法性 ----
+    if (grid.empty() || aos.empty()) return {};
+    if (blksize <= 0) throw std::runtime_error("build_screen_index_no_omp: blksize must be > 0");
+    if (!(cutoff > 0.0)) throw std::runtime_error("build_screen_index_no_omp: cutoff must be > 0");
+
+    const int G    = (int)grid.size();
+    const int nAO  = (int)aos.size();
+    const int nblk = (G + blksize - 1) / blksize;
+
+    nbins = std::min(std::max(nbins, 1), 127);
+
+    // 防止 log(<=0)
+    const double cutoff_c = std::min(cutoff, 0.1);
+    if (!(cutoff_c > 0.0)) throw std::runtime_error("build_screen_index_no_omp: cutoff too small");
+
+    const double scale = - (double)nbins / std::log(cutoff_c);
+
+    std::vector<uint8_t> screen_index((size_t)nblk * (size_t)nAO, 0);
+    std::vector<double>  rr_buf((size_t)blksize);
+
+    for (int ao_id = 0; ao_id < nAO; ++ao_id) {
+        const AODesc &ao = aos[ao_id];
+        const int l = ao.l;
+
+        // 原子下标与数据合法性
+        if (ao.atom < 0 || ao.atom >= (int)atm_coords.size()) continue;             // 整列 0
+        if (ao.exps.empty() || ao.coeffs.empty())            continue;              // 整列 0
+
+        // 可选：若你要求严格等长，就启用下面一行
+        // if (ao.exps.size() != ao.coeffs.size()) continue;
+
+        const double ax = atm_coords[ao.atom][0];
+        const double ay = atm_coords[ao.atom][1];
+        const double az = atm_coords[ao.atom][2];
+
+        double min_exp = 1e300;
+        for (double a : ao.exps) min_exp = std::min(min_exp, a);
+
+        double maxc = 0.0;
+        for (double c : ao.coeffs) maxc = std::max(maxc, std::fabs(c));
+
+        if (!(min_exp > 0.0) || !(maxc > 0.0)) continue;    // 避免 log(0)、负指数
+
+        const double log_coeff = std::log(maxc);
+
+        // l>0 的内区界
+        double r2sup    = 0.0;
+        double a_rr_min = -log_coeff;
+        if (l > 0) {
+            r2sup    = (double)l / (2.0 * min_exp);
+            if (r2sup <= 0.0 || !std::isfinite(r2sup)) continue;
+            a_rr_min = min_exp * r2sup - 0.5 * std::log(r2sup) * l - log_coeff;
+        }
+
+        for (int ib = 0; ib < nblk; ++ib) {
+            const int g0 = ib * blksize;
+            const int g1 = std::min(G, (ib + 1) * blksize);
+            const int dg = g1 - g0;
+            if (dg <= 0) continue;
+
+            for (int i = 0; i < dg; ++i) {
+                const double dx = grid[g0 + i][0] - ax;
+                const double dy = grid[g0 + i][1] - ay;
+                const double dz = grid[g0 + i][2] - az;
+                rr_buf[(size_t)i] = dx*dx + dy*dy + dz*dz;
+            }
+
+            double rr_min = 1e300;
+            for (int i = 0; i < dg; ++i) rr_min = std::min(rr_min, rr_buf[(size_t)i]);
+
+            double a_rr;
+            if (l == 0) {
+                a_rr = min_exp * rr_min - log_coeff;
+            } else if (rr_min < r2sup) {
+                a_rr = a_rr_min;                          // 避免 log(0)
+            } else {
+                // rr_min > 0 时才会走到这里：安全
+                a_rr = min_exp * rr_min - 0.5 * std::log(rr_min) * l - log_coeff;
+            }
+
+            // 映射为离散等级（鲁棒处理 NaN/Inf）
+            uint8_t si_byte = 0;
+            if (std::isfinite(a_rr)) {
+                const double si_real = (double)nbins - a_rr * scale;
+                if (si_real > 0.0 && std::isfinite(si_real)) {
+                    const int si = (int)(si_real + 1.0);
+                    si_byte = (uint8_t)std::min(si, nbins);
+                }
+            }
+            screen_index[(size_t)ib * (size_t)nAO + (size_t)ao_id] = si_byte;
+        }
+    }
+    return screen_index;
+}
+
+void evaluate_AO_on_grid_screened(
+    const std::vector<AODesc> &aos,                       // nao
+    const std::vector<std::array<double, 3>> &atm_coords, // A×3 (Bohr)
+    const std::vector<std::array<double, 3>> &grids,      // G×3 (AoS)
+    int blksize,                                          // 与构建 screen_index 时一致
+    const std::vector<uint8_t> &screen_index,             // 大小: nblk*nao
+    std::vector<double> &ao_out                           // 输出: nao*G
+);
+
 
 #ifdef DEMO_MAIN
 int main()

@@ -13,7 +13,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
 
 # ---- 静态库 dftgrid ----
-add_library(dftgrid SHARED
+add_library(dftgrid STATIC
   src/dft_atomGrid.cpp
   src/dft_constant.cpp
   src/dft_lebedev.cpp
