@@ -24,7 +24,7 @@ int main(int argc, char **argv)
     std::string tag = (argc >= 2 && argv[1] && std::string(argv[1]).size() > 0)
                           ? std::string(argv[1])
                           : std::string("mol");
-    chemgrid::gen_grid_screen(tag);
+    chemgrid::gen_grid(tag);
     // const std::string input_file = tag + ".txt";
     // const std::string final_out = tag + "_grid.txt";
     // // ======================================================
