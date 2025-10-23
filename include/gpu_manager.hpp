@@ -24,6 +24,7 @@
 #include "types.hpp"
 #include "profiler.hpp"
 #include "gpu_kernels.hpp"
+#include  "Et_functions.hpp"
 #include "utils.hpp" // THROW_EXCEPTION
 
 namespace gansu::gpu{

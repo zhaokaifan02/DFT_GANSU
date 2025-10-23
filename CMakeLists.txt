@@ -76,8 +76,9 @@ add_library(dftgrid STATIC
 )
 
 target_include_directories(dftgrid PUBLIC ${CMAKE_SOURCE_DIR}/include)
-target_link_libraries(dftgrid
-  PUBLIC
+target_link_libraries(dftgrid PUBLIC
+    cublas
+    cusolver
     Eigen3::Eigen
     int1e
     int2e
@@ -92,9 +93,5 @@ set_target_properties(dftgrid PROPERTIES
 
 # -------- 可执行程序 --------
 add_executable(test_atomgrid ${CMAKE_SOURCE_DIR}/test_atomgrid4.cpp)
-target_link_libraries(test_atomgrid PRIVATE dftgrid Eigen3::Eigen)
+target_link_libraries(test_atomgrid dftgrid)
 
-if(MSVC)
-  target_compile_options(dftgrid       PRIVATE /utf-8)
-  target_compile_options(test_atomgrid PRIVATE /utf-8)
-endif()
