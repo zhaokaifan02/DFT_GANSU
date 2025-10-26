@@ -16,7 +16,7 @@ def init_grid(mol, grid_add, level=3):
     grids.level = level
     grids.build()
     m_grid = "./build/bin/" + grid_add + "_grid.txt"
-    m_ao = "./build/bin/" + grid_add + "_SCREEN_AO.txt"
+    m_ao = "./build/bin/" + grid_add + "_AO.txt"
 
     data = np.loadtxt(m_grid)
     atm_idx_c = data[:, 0].astype(np.int32)
@@ -25,22 +25,13 @@ def init_grid(mol, grid_add, level=3):
     grids.coords = coords_c
     grids.weights = weights_c
     ao = load_ao_txt(m_ao)
-    with open("coords.txt", "w") as f:
-        ngrid = coords_c.shape[0]
-        f.write(f"{ngrid}\n")
-        np.savetxt(f, coords_c, fmt="%.16e")
+    # with open("coords.txt", "w") as f:
+    #     ngrid = coords_c.shape[0]
+    #     f.write(f"{ngrid}\n")
+    #     np.savetxt(f, coords_c, fmt="%.16e")
 
-# 2️⃣ 导出 weights.txt
-    with open("weights.txt", "w") as f:
-        ngrid = weights_c.shape[0]
-        f.write(f"{ngrid}\n")
-        np.savetxt(f, weights_c, fmt="%.16e")
 
-# 3️⃣ 导出 AO.txt
-    with open("AO.txt", "w") as f:
-        ngrid, nao = ao.shape
-        f.write(f"{ngrid} {nao}\n")
-        np.savetxt(f, ao, fmt="%.16e")
+
     print("ao shape: ",ao.shape)# 
     print("grid coords shape:", grids.coords.shape) #every x y z no boxes
     return grids, ao

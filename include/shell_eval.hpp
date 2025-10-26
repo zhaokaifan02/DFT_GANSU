@@ -7,7 +7,15 @@
 #include <cmath>
 #include "types.hpp"     // Atom, Coordinate, AngularMomentums, angstrom_to_bohr
 #include "basis_set.hpp" // BasisSet, ElementBasisSet, ContractedGauss
-
+// ====================== AO “函数对象”：一条记录就是一个 AO 分量 ======================
+struct AODesc
+{
+    int atom;                   // 该 AO 所在的原子索引
+    int l;                      // 壳角动量
+    int lx, ly, lz;             // 笛卡尔幂次数
+    std::vector<double> exps;   // α_j
+    std::vector<double> coeffs; // c_j（含或不含归一化，视你的设定）
+};
 static inline void cartesian_triples_for_l(int l, std::vector<std::tuple<int, int, int>> &out)
 {
     out.clear();
@@ -75,15 +83,7 @@ static inline void normalize_contracted_cart(
     }
 }
 
-// ====================== AO “函数对象”：一条记录就是一个 AO 分量 ======================
-struct AODesc
-{
-    int atom;                   // 该 AO 所在的原子索引
-    int l;                      // 壳角动量
-    int lx, ly, lz;             // 笛卡尔幂次数
-    std::vector<double> exps;   // α_j
-    std::vector<double> coeffs; // c_j（含或不含归一化，视你的设定）
-};
+
 
 // 根据 gbs + 分子生成 AO 列表（每个笛卡尔分量算一个 AO）
 struct BuildOptions

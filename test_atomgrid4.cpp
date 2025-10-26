@@ -14,7 +14,73 @@
 #include "basis_set.hpp"
 #include "types.hpp"
 #include "dft_genGrid.hpp"
+#include "dft_gbsReader.hpp"
+#include "dft_aoEVAL.hpp"
 using namespace std;
+void write_ao_txt(const std::string &path,
+                  const std::vector<double> &ao_out,
+                  int ngrids, int nao)
+{
+    if ((int)ao_out.size() != ngrids * nao)
+    {
+        throw std::runtime_error("write_ao_txt: size mismatch: expected ngrids*nao");
+    }
+
+    std::ofstream fout(path);
+    if (!fout.is_open())
+    {
+        throw std::runtime_error("write_ao_txt: cannot open file: " + path);
+    }
+
+    // 第一行：ngrids nao
+    fout << ngrids << " " << nao << "\n";
+
+    fout << std::scientific << std::setprecision(17);
+
+    // 输出顺序：按 g 行、mu 列
+    for (int g = 0; g < ngrids; ++g)
+    {
+        for (int mu = 0; mu < nao; ++mu)
+        {
+            fout << std::setw(25) << ao_out[mu * ngrids + g];
+            if (mu + 1 < nao)
+                fout << " ";
+        }
+        fout << "\n";
+    }
+
+    fout.close();
+}
+void export_GRID_txt(const std::string &filename,
+                      const std::vector<std::array<double, 3>> &coords,
+                      const std::vector<double> &weights,
+                      const std::vector<double> &quadrature_weights,
+                      const std::vector<int> &atm_idx)
+{
+    const std::size_t N = coords.size();
+    std::cout << "N=" << N << ", weights.size()=" << weights.size()
+              << ", quadrature_weights.size()=" << quadrature_weights.size()
+              << ", atm_idx.size()=" << atm_idx.size() << std::endl;
+
+    if (weights.size() != N || atm_idx.size() != N)
+        throw std::invalid_argument("export_grid_txt: 输入数组大小不一致");
+
+    std::ofstream ofs(filename);
+    if (!ofs)
+        throw std::runtime_error("无法打开输出文件: " + filename);
+
+    ofs << std::scientific << std::setprecision(20);
+    for (std::size_t i = 0; i < N; ++i)
+    {
+        ofs << atm_idx[i] << " "
+            << coords[i][0] << " "
+            << coords[i][1] << " "
+            << coords[i][2] << " "
+            << weights[i] << " "
+            << quadrature_weights[i] << "\n";
+    }
+    ofs.close();
+}
 
 
 int main(int argc, char **argv)
@@ -24,7 +90,51 @@ int main(int argc, char **argv)
     std::string tag = (argc >= 2 && argv[1] && std::string(argv[1]).size() > 0)
                           ? std::string(argv[1])
                           : std::string("mol");
-    chemgrid::gen_grid(tag);
+    const std::string final_out = tag + "_grid.txt";
+    const std::string final_outAO = tag + "_AO.txt";
+    std::vector<int> charges;
+    std::vector<std::array<double, 3>> atm_coords;
+    chemgrid::dft_getMolfromTXT(tag, charges, atm_coords);
+    // 生成网格
+    std::pair<std::vector<std::array<double, 3>>, std::vector<double>> grids = chemgrid::dft_gen_grid(charges, atm_coords);
+    std::vector<int> atm_idx(grids.first.size(), 0); // 占位符
+    export_GRID_txt(final_out, grids.first, grids.second, grids.second, atm_idx);
+
+    // 读取基组
+    
+    chemgrid::gbs::GBSReader reader;
+    reader.build("./sto-3g.gbs");
+    cout << "Loaded elements: \n";
+    // 查看 H 和 O 的基组信息
+    chemgrid::gbs::ElementBasis HB = reader.element_basis("H");
+    chemgrid::gbs::ElementBasis OB = reader.element_basis("O");
+    for (const auto &shell : HB.shells)
+    {
+        cout << "H shell type: " << shell.type << ", l: " << shell.l << ", nprim: " << shell.exps.size() << endl;
+    }
+    cout << "OB shells:\n";
+    cout << OB.shells.size() << " shells found for O element.\n";
+    cout << HB.shells.size() << " shells found for H element.\n";
+    for (const auto &shell : OB.shells)
+    {
+        cout << "O shell type: " << shell.type << ", l: " << shell.l << ", nprim: " << shell.exps.size() << endl;
+    }
+    // 生成 AO 列表
+    std::cout << "Generated grid for tag: " << tag << endl;
+    std::vector<AODesc> aos = chemgrid::gbs::build_aodescs_from_gbs(reader, charges, atm_coords);
+    cout << "Generated grid for tag: " << tag << endl;
+    std::cout << "AOS size: " << aos.size() << std::endl;
+    std::vector<double> ao_out;
+    chemgrid::AOEval::evaluate_AO_on_grid_GPU_AOmajor(aos, atm_coords, grids.first, ao_out);
+    std::cout << "Evaluated AO on grid, ao_out size: " << ao_out.size() << std::endl;
+    int ngrids = static_cast<int>(grids.first.size());
+    int nao = static_cast<int>(aos.size());
+
+    write_ao_txt(final_outAO, ao_out, ngrids, nao);
+    std::cout << "AO written to ao.txt (" << ngrids << " x " << nao << ")" << std::endl;
+
+    // 写 AO 结果
+    return 0;
     // const std::string input_file = tag + ".txt";
     // const std::string final_out = tag + "_grid.txt";
     // // ======================================================
