@@ -25,25 +25,10 @@ add_library(dftAO STATIC
   src/dft_partition_gpu.cu
   src/dft_genGrid.cpp
   src/basis_set.cpp
-  src/shell_eval.cpp
-  src/dft_gbsReader.cpp
+  src/dft_shell_eval.cpp
   src/dft_aoEVAL.cpp
   src/dft_aoEVAL_kernel.cu
   src/lda.cu
-  src/eri.cu
-  src/gpu_kernels.cu
-  src/gpu_manager.cu
-  src/hf.cu
-  src/int1e.cu
-  src/int2e.cu
-  src/int2c2e.cu
-  src/int3c2e.cu
-  src/parameter_manager.cpp
-  src/parseXYZ.cpp
-  src/profiler.cu
-  src/rhf.cu
-  src/rohf.cu
-  src/uhf.cu
   src/utils.cpp
 )
 

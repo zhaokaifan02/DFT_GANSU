@@ -292,6 +292,8 @@ void write_ao_ngrid_nao_txt(const std::string &path,
         }
         ofs << '\n';
     }
+
+    
 }
 
 void chemgrid::gen_grid(std::string tag)

@@ -180,9 +180,18 @@ if __name__ == "__main__":
     #     H	-1.065	-1.960	-0.880
     # ''' 
     atom_structure ="""
-O          0.000        0.000       0.127
-H          0.000        0.758      -0.509
-H          0.000      -0.758      -0.509
+C   0.000    1.387    0.000
+C   1.201    0.693    0.000
+C   1.201   -0.693    0.000
+C   0.000   -1.387    0.000
+C  -1.201   -0.693    0.000
+C   -1.201    0.693    0.000
+H   0.000    2.469    0.000 
+H   2.139    1.235    0.000
+H   2.139   -1.235    0.000
+H   0.000   -2.469   0.000
+H  -2.139   -1.235    0.000
+H  -2.139    1.235    0.000
     """
     # atom_structure = 'O 0.0 0.0 0.0; H 0.0 0.0 0.96; H 0.0 0.93 0.0'
 
@@ -246,7 +255,7 @@ H          0.000      -0.758      -0.509
     # """
 
 
-    mol_name = "H2O"
+    mol_name = "Benzene"
     Hcore, S, nocc, T, eri, ao_values, grids, E_nuc = build(atom_structure, mol_name)
     e_init, C_init = eigh(Hcore, S)
     dm = 2 * C_init[:, :nocc] @ C_init[:, :nocc].T
@@ -310,10 +319,13 @@ H          0.000      -0.758      -0.509
 
     mol = gto.Mole()
     mol.atom = atom_structure
-    mol.basis = 'sto-3g'
+    mol.cart = True
+    mol.spin = None
+    mol.basis = 'cc-pvdz'
     mol.build()
     def LDA(mol):
         mf = dft.RKS(mol)
+        mf.grids =grids
         mf.xc = 'LDA,VWN'  
         energy = mf.kernel()
         return mf

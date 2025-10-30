@@ -39,7 +39,9 @@ def init_grid(mol, grid_add, level=3):
 def build(atom_structure, grid_add):
     mol = gto.Mole()
     mol.atom = atom_structure
-    mol.basis = 'sto-3g'
+    mol.basis = 'cc-pvdz'
+    mol.cart = True
+    mol.spin = None
     mol.build()
     
     nao = mol.nao_nr() 
