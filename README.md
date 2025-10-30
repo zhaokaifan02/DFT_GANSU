@@ -1,2 +1,0 @@
-# DFT_GANSU
-GANSU DFT
