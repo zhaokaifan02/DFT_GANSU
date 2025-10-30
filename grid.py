@@ -19,9 +19,8 @@ def init_grid(mol, grid_add, level=3):
     m_ao = "./work/grids/" + grid_add + "_AO.txt"
 
     data = np.loadtxt(m_grid)
-    atm_idx_c = data[:, 0].astype(np.int32)
-    coords_c = data[:, 1:4]
-    weights_c = data[:, 4]
+    coords_c = data[:, 0:3]
+    weights_c = data[:, 3]
     grids.coords = coords_c
     grids.weights = weights_c
     ao = load_ao_txt(m_ao)

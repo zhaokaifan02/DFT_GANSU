@@ -17,7 +17,6 @@
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 #include <cmath>
-// 这俩数组的“编译期尺寸”极小，ptxas 不会再超限
 namespace chemgrid::gpu
 {
     __global__ void becke_partition_kernel_atom(

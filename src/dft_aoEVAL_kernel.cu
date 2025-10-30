@@ -1,10 +1,10 @@
 #include "dft_aoEVAL.hpp"
 #include <math.h>
 #ifndef BLK_X
-#define BLK_X 16 // g 方向
+#define BLK_X 16 // g
 #endif
 #ifndef BLK_Y
-#define BLK_Y 16 // ao 方向 (mu)
+#define BLK_Y 16 // ao
 #endif
 
 namespace chemgrid::AOEval
@@ -20,68 +20,11 @@ namespace chemgrid::AOEval
                                      cudaGetErrorString(error));   \
         }                                                          \
     } while (0)
-
-    // /**
-    //  * @brief CUDA kernel: 评估单个 AO 在所有网格点上的值
-    //  *
-    //  * 每个 thread 处理一个网格点
-    //  */
-    // __global__ void evaluate_single_ao_kernel(
-    //     double *ao_values,         // 输出 [ngrids]
-    //     const double *grid_coords, // [ngrids x 3]
-    //     const double *atom_coord,  // [3] 该 AO 所在原子的坐标
-    //     const double *exps,        // [nprim]
-    //     const double *coeffs,      // [nprim]
-    //     int nprim,
-    //     int lx, int ly, int lz, // 笛卡尔幂次
-    //     int ngrids)
-    // {
-    //     int gid = blockIdx.x * blockDim.x + threadIdx.x;
-    //     if (gid >= ngrids)
-    //         return;
-
-    //     // 网格点坐标
-    //     double gx = grid_coords[gid * 3 + 0];
-    //     double gy = grid_coords[gid * 3 + 1];
-    //     double gz = grid_coords[gid * 3 + 2];
-
-    //     // 相对坐标
-    //     double dx = gx - atom_coord[0];
-    //     double dy = gy - atom_coord[1];
-    //     double dz = gz - atom_coord[2];
-
-    //     // r^2
-    //     double r2 = dx * dx + dy * dy + dz * dz;
-
-    //     // 笛卡尔部分: x^lx * y^ly * z^lz
-    //     double cart_part = 1.0;
-    //     for (int i = 0; i < lx; ++i)
-    //         cart_part *= dx;
-    //     for (int i = 0; i < ly; ++i)
-    //         cart_part *= dy;
-    //     for (int i = 0; i < lz; ++i)
-    //         cart_part *= dz;
-
-    //     // 对所有基元高斯求和
-    //     double ao_value = 0.0;
-    //     for (int p = 0; p < nprim; ++p)
-    //     {
-    //         double alpha = exps[p];
-    //         double coeff = coeffs[p];
-    //         double radial = exp(-alpha * r2);
-    //         ao_value += coeff * radial;
-    //     }
-    //     if (lx + ly + lz == 0)
-    //         ao_value *= 0.282094791773878143;
-    //     if (lx + ly + lz == 1)
-    //         ao_value *= 0.488602511902919921;
-    //     ao_values[gid] = ao_value * cart_part;
-    // }
     /**
-     * @brief CUDA kernel: 评估单个 AO
+     * @brief CUDA kernel: AO eval
      */
     __global__ void evaluate_single_ao_kernel(
-        double *ao_values,         // 输出位置（已偏移到第 ao_idx 列）
+        double *ao_values,         // output
         const double *grid_coords, // [ngrids x 3]
         const double *atom_coord,  // [3]
         const double *exps,        // [nprim]
@@ -94,21 +37,16 @@ namespace chemgrid::AOEval
         int gid = blockIdx.x * blockDim.x + threadIdx.x;
         if (gid >= ngrids)
             return;
-
-        // 网格点坐标
         double gx = grid_coords[gid * 3 + 0];
         double gy = grid_coords[gid * 3 + 1];
         double gz = grid_coords[gid * 3 + 2];
 
-        // 相对坐标
         double dx = gx - atom_coord[0];
         double dy = gy - atom_coord[1];
         double dz = gz - atom_coord[2];
 
         // r^2
         double r2 = dx * dx + dy * dy + dz * dz;
-
-        // 笛卡尔部分
         double cart_part = 1.0;
         for (int i = 0; i < lx; ++i)
             cart_part *= dx;
@@ -117,7 +55,6 @@ namespace chemgrid::AOEval
         for (int i = 0; i < lz; ++i)
             cart_part *= dz;
 
-        // 高斯求和
         double ao_value = 0.0;
         for (int p = 0; p < nprim; ++p)
         {
@@ -131,25 +68,24 @@ namespace chemgrid::AOEval
             ao_value *= 0.282094791773878143;
         if (lx + ly + lz == 1)
             ao_value *= 0.488602511902919921;
-        // stride 写入
         ao_values[gid * nao] = ao_value * cart_part;
     }
 
     /**
-     * @brief GPU 评估所有 AO（使用原始指针，避免 vector 大小限制）
+     * @brief GPU evaluates all AOs (using raw pointers to avoid vector size limitations)
      *
-     * @param ao_list AO 列表
-     * @param atom_coords 原子坐标
-     * @param grid_coords 网格点坐标
-     * @param out_ao_values 输出数组指针（调用者分配）[ngrids x nao]
-     * @param ngrids 网格点数量
-     * @param nao AO 数量
+     * @param ao_list List of AOs
+     * @param atom_coords Atomic coordinates
+     * @param grid_coords Grid point coordinates
+     * @param out_ao_values Output array pointer (allocated by the caller) [ngrids x nao]
+     * @param ngrids Number of grid points
+     * @param nao Number of AOs
      */
     void evaluate_aos_on_grids_gpu_raw(
         const std::vector<AODesc> &ao_list,
         const std::vector<std::array<double, 3>> &atom_coords,
         const std::vector<std::array<double, 3>> &grid_coords,
-        double *out_ao_values, // ← 输出：调用者提供的指针
+        double *out_ao_values, // ← Output: pointer provided by the caller
         int ngrids,
         int nao)
     {
@@ -162,19 +98,19 @@ namespace chemgrid::AOEval
             throw std::invalid_argument("ngrids != grid_coords.size()");
         }
 
-        std::cout << "评估 " << nao << " 个 AO 在 " << ngrids << " 个网格点上...\n";
+        std::cout << "Evaluating " << nao << " AOs on " << ngrids << " grid points...\n";
 
-        // 检查内存大小
+        // Check memory size
         size_t total_size = (size_t)ngrids * (size_t)nao * sizeof(double);
-        std::cout << "总内存需求: " << total_size / (1024.0 * 1024.0) << " MB\n";
+        std::cout << "Total memory requirement: " << total_size / (1024.0 * 1024.0) << " MB\n";
 
-        // ========== 分配设备内存 ==========
+        // ========== Allocate device memory ==========
 
         double *d_ao_values;
         CUDA_CHECK(cudaMalloc(&d_ao_values, total_size));
-        CUDA_CHECK(cudaMemset(d_ao_values, 0, total_size)); // 初始化为 0
+        CUDA_CHECK(cudaMemset(d_ao_values, 0, total_size)); // Initialize to 0
 
-        // 网格坐标
+        // Grid coordinates
         double *h_flat_grids = new double[ngrids * 3];
         for (int i = 0; i < ngrids; ++i)
         {
@@ -189,11 +125,11 @@ namespace chemgrid::AOEval
                               ngrids * 3 * sizeof(double), cudaMemcpyHostToDevice));
         delete[] h_flat_grids;
 
-        // kernel 配置
+        // Kernel configuration
         int block_size = 256;
         int grid_size = (ngrids + block_size - 1) / block_size;
 
-        // ========== loop AO ==========
+        // ========== Loop over AOs ==========
         cudaEvent_t start, stop;
         float milliseconds = 0;
         CUDA_CHECK(cudaEventCreate(&start));
@@ -203,7 +139,7 @@ namespace chemgrid::AOEval
         {
             const AODesc &ao = ao_list[ao_idx];
             int nprim = ao.exps.size();
-            // atom
+            // Atom
             double atom_coord[3] = {
                 atom_coords[ao.atom][0],
                 atom_coords[ao.atom][1],
@@ -212,7 +148,7 @@ namespace chemgrid::AOEval
             CUDA_CHECK(cudaMalloc(&d_atom_coord, 3 * sizeof(double)));
             CUDA_CHECK(cudaMemcpy(d_atom_coord, atom_coord, 3 * sizeof(double),
                                   cudaMemcpyHostToDevice));
-            // exps  coeffs
+            // Exponents and coefficients
             double *d_exps;
             double *d_coeffs;
             CUDA_CHECK(cudaMalloc(&d_exps, nprim * sizeof(double)));
@@ -221,7 +157,7 @@ namespace chemgrid::AOEval
                                   cudaMemcpyHostToDevice));
             CUDA_CHECK(cudaMemcpy(d_coeffs, ao.coeffs.data(), nprim * sizeof(double),
                                   cudaMemcpyHostToDevice));
-            // kernel start
+            // Kernel start
             evaluate_single_ao_kernel<<<grid_size, block_size>>>(
                 d_ao_values + ao_idx, // ao_idx offset
                 d_grid_coords,
@@ -240,7 +176,7 @@ namespace chemgrid::AOEval
 
             if ((ao_idx + 1) % 10 == 0 || ao_idx == nao - 1)
             {
-                std::cout << "  已完成 " << (ao_idx + 1) << "/" << nao << " 个 AO\n";
+                std::cout << "  Completed " << (ao_idx + 1) << "/" << nao << " AOs\n";
             }
         }
 
@@ -251,24 +187,24 @@ namespace chemgrid::AOEval
         std::cout << "========================================" << std::endl;
         std::cout << "Total loop time: " << milliseconds << " ms" << std::endl;
         std::cout << "========================================" << std::endl;
-        // 销毁事件
+        // Destroy events
         CUDA_CHECK(cudaEventDestroy(start));
         CUDA_CHECK(cudaEventDestroy(stop));
-        // --- 测速结束 ---
-        // ========== 单次 memcpy 拷贝所有数据 ==========
+        // --- Timing ends ---
+        // ========== Single memcpy to copy all data ==========
 
-        std::cout << "拷贝结果回 CPU (" << total_size / (1024.0 * 1024.0) << " MB)...\n";
+        std::cout << "Copying results back to CPU (" << total_size / (1024.0 * 1024.0) << " MB)...\n";
         CUDA_CHECK(cudaMemcpy(out_ao_values, d_ao_values, total_size, cudaMemcpyDeviceToHost));
 
-        // 释放设备内存
+        // Free device memory
         CUDA_CHECK(cudaFree(d_grid_coords));
         CUDA_CHECK(cudaFree(d_ao_values));
 
-        std::cout << "GPU 评估完成！\n";
+        std::cout << "GPU evaluation completed!\n";
     }
 
     /**
-     * @brief 兼容性包装：返回 vector（小数据量时使用）
+     * @brief Compatibility wrapper: returns vector (for small data sizes)
      */
     std::vector<double> evaluate_aos_on_grids_gpu(
         const std::vector<AODesc> &ao_list,
@@ -278,14 +214,14 @@ namespace chemgrid::AOEval
         int ngrids = grid_coords.size();
         int nao = ao_list.size();
 
-        // 检查大小是否超过 vector 限制
+        // Check if size exceeds vector limits
         size_t total_elements = (size_t)ngrids * (size_t)nao;
         size_t max_vector_size = std::vector<double>().max_size();
 
         if (total_elements > max_vector_size)
         {
             throw std::runtime_error(
-                "数据量太大，无法用 vector 存储！请使用 evaluate_aos_on_grids_gpu_raw()");
+                "Data size too large to store in vector! Please use evaluate_aos_on_grids_gpu_raw()");
         }
 
         std::vector<double> ao_values(total_elements);
@@ -293,4 +229,5 @@ namespace chemgrid::AOEval
                                       ao_values.data(), ngrids, nao);
         return ao_values;
     }
+
 }

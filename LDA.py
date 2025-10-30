@@ -146,7 +146,7 @@ def solve_fock_equation(F, S):
 
 def adaptive_mixing(dm_new, dm_old, cycle, dm_change):
     """
-    自适应密度混合
+    auto mixing
     """
     if cycle < 5:
         mix_param = 0.3
@@ -180,18 +180,9 @@ if __name__ == "__main__":
     #     H	-1.065	-1.960	-0.880
     # ''' 
     atom_structure ="""
-C   0.000    1.387    0.000
-C   1.201    0.693    0.000
-C   1.201   -0.693    0.000
-C   0.000   -1.387    0.000
-C  -1.201   -0.693    0.000
-C   -1.201    0.693    0.000
-H   0.000    2.469    0.000 
-H   2.139    1.235    0.000
-H   2.139   -1.235    0.000
-H   0.000   -2.469   0.000
-H  -2.139   -1.235    0.000
-H  -2.139    1.235    0.000
+O          0.000        0.000       0.127
+H          0.000        0.758      -0.509
+H          0.000      -0.758      -0.509
     """
     # atom_structure = 'O 0.0 0.0 0.0; H 0.0 0.0 0.96; H 0.0 0.93 0.0'
 
@@ -255,7 +246,7 @@ H  -2.139    1.235    0.000
     # """
 
 
-    mol_name = "Benzene"
+    mol_name = "H2O"
     Hcore, S, nocc, T, eri, ao_values, grids, E_nuc = build(atom_structure, mol_name)
     e_init, C_init = eigh(Hcore, S)
     dm = 2 * C_init[:, :nocc] @ C_init[:, :nocc].T
@@ -332,21 +323,16 @@ H  -2.139    1.235    0.000
     mf = LDA(mol)
     dm = mf.make_rdm1()
 
-    # 一电子项（动能 + 核吸引）
     h1 = mol.intor('int1e_kin') + mol.intor('int1e_nuc')
     E_one = np.einsum('ij,ji->', h1, dm)
 
-    # Hartree + XC 势
     veff = mf.get_veff(mol, dm)
 
-    # Coulomb 能量 (0.5 * ρV_H)
     vh = mf.get_j(mol, dm)
     E_coul = 0.5 * np.einsum('ij,ji->', vh, dm)
 
-    # 交换-相关能量
     E_exc = mf.energy_elec()[0] - (E_one + E_coul)
 
-    # 总能量
     E_tot = mf.energy_tot()
     
     print(f' E_one : {E_one:.6f} Hartree')
