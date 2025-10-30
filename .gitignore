@@ -1,2 +1,4 @@
 build/
-__pycach__/
+__pycache__/
+
+work/girds/*

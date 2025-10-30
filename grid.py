@@ -15,8 +15,8 @@ def init_grid(mol, grid_add, level=3):
     grids = dft.gen_grid.Grids(mol)
     grids.level = level
     grids.build()
-    m_grid = "./build/bin/" + grid_add + "_grid.txt"
-    m_ao = "./build/bin/" + grid_add + "_AO.txt"
+    m_grid = "./work/grids/" + grid_add + "_grid.txt"
+    m_ao = "./work/grids/" + grid_add + "_AO.txt"
 
     data = np.loadtxt(m_grid)
     atm_idx_c = data[:, 0].astype(np.int32)
@@ -25,10 +25,6 @@ def init_grid(mol, grid_add, level=3):
     grids.coords = coords_c
     grids.weights = weights_c
     ao = load_ao_txt(m_ao)
-    # with open("coords.txt", "w") as f:
-    #     ngrid = coords_c.shape[0]
-    #     f.write(f"{ngrid}\n")
-    #     np.savetxt(f, coords_c, fmt="%.16e")
 
 
 
@@ -48,12 +44,12 @@ def build(atom_structure, grid_add):
     nelec = mol.nelec[0] + mol.nelec[1]
     nocc = nelec // 2
     
-    print(f"基函数数: {nao}")
-    print(f"电子数: {nelec}")
-    print(f"占据轨道数: {nocc}")
+    print(f"nao: {nao}")
+    print(f"nelec: {nelec}")
+    print(f"nocc: {nocc}")
 
     grids, ao_values = init_grid(mol, grid_add)
-    print(f"积分网格点数: {len(grids.coords)}")
+    print(f"ngrids:  {len(grids.coords)}")
     
     S = mol.intor('int1e_ovlp')
     T = mol.intor('int1e_kin')

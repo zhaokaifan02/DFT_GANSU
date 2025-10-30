@@ -8,7 +8,7 @@ import time
 from datetime import timedelta
 
 
-libname = {'linux':'./build/libdftgrid.so',
+libname = {'linux':'./work/libdftAO.so',
            'darwin':'lda.so',
            'win32':'dft.dll'}[sys.platform]
 lib = ctypes.CDLL(os.path.abspath(libname))
