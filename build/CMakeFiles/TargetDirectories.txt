@@ -1,4 +1,0 @@
-/home/fanzhaokai/DFTCPP/build/CMakeFiles/dftgrid.dir
-/home/fanzhaokai/DFTCPP/build/CMakeFiles/test_atomgrid.dir
-/home/fanzhaokai/DFTCPP/build/CMakeFiles/edit_cache.dir
-/home/fanzhaokai/DFTCPP/build/CMakeFiles/rebuild_cache.dir
