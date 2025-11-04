@@ -1,0 +1,8 @@
+xyzfilename = ../xyz/H2O.xyz
+gbsfilename = ../basis/sto-3g.gbs
+
+method = ROHF
+
+convergence_method = DIIS
+diis_size = 8
+diis_include_transform = false
