@@ -19,7 +19,7 @@
 #include "hf.hpp"
 #include "types.hpp"
 #include "device_host_memory.hpp"
-
+#include "dftGrids.hpp" //grid
 
 
 namespace gansu{
@@ -152,7 +152,7 @@ public:
     void precomputation() override;
 
     std::string get_algorithm_name() override { return "DFT"; } ///< Get the algorithm name
-
+    
 
 
 protected:

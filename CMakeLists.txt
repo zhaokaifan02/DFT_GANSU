@@ -56,6 +56,9 @@ set(SOURCES
     src/parameter_manager.cpp
     src/eri.cu
     src/utils.cpp
+    
+    src/dftGrids.cpp
+    src/dftGrids_kernels.cu
 )
 
 add_library(gansu STATIC ${SOURCES})

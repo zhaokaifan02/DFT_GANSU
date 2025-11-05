@@ -26,6 +26,7 @@
 #include "gpu_kernels.hpp"
 #include "utils.hpp" // THROW_EXCEPTION
 
+#include "dftGrids.hpp"
 namespace gansu::gpu{
 
 
@@ -102,7 +103,7 @@ void computeJMatrix_DFT_RHF(const real_t* d_density_matrix, real_t* d_J_matrix, 
 void computeKMatrix_DFT_RHF(const real_t* d_density_matrix, real_t* d_K_matrix, const std::vector<ShellTypeInfo>& shell_type_infos, const std::vector<ShellPairTypeInfo>& shell_pair_type_infos,const PrimitiveShell* d_primitive_shells, const real_t* d_cgto_normalization_factors, const size_t2* d_primitive_shell_pair_indices,const int num_basis, const real_t* d_boys_grid, const real_t schwarz_screening_threshold,const real_t* d_schwarz_upper_bound_factors,const bool verbose);
 
 /* ---------------------------------------------------- [DFT] ---------------------------------------------------- */
-void build(const Atom* h_atoms, AOGrids& aoGrids, std::pair<std::vector<std::array<double, 3>>,std::vector<double>>& grids);
+void build(const Atom* h_atoms,const int nAtom, const PrimitiveShell *shells_ptr,int bsisnum,AOGrids& aoGrids, std::pair<std::vector<std::array<double, 3>>,std::vector<double>>& grids);
 void get_rho(const int num_basis, const int ngrids, const double* d_dm, const double* d_ao, double* d_rho);
 void build_vxc_matrix(const int num_basis, const int ngrids, const double* d_ao, std::vector<double>& weights_vector, double* d_rho, double* d_V);
 
