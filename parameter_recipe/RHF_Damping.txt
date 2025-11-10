@@ -1,0 +1,7 @@
+xyzfilename = ../xyz/H2O.xyz
+gbsfilename = ../basis/sto-3g.gbs
+
+method = RHF
+
+convergence_method = Damping
+damping_factor = 0.9

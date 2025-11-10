@@ -1,0 +1,8 @@
+gbsfilename = ../basis/6-31g.gbs
+method = RHF
+convergence_method = DIIS
+convergence_energy_threshold = 1.0e-10
+schwarz_screening_threshold = 1.0e-13
+diis_size = 8
+diis_include_transform = false
+initial_guess = sad
