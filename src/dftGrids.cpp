@@ -1,4 +1,5 @@
 #include "dftGrids.hpp"
+#include <set>
 
 namespace gansu::dft::chemgrid
 {
@@ -1134,43 +1135,59 @@ namespace gansu::dft
         return {part.first, part.second};
     }
 
-    // 修改后的函数：使用原子核电荷数作为 key
+    // 修改后的函数：
     std::map<int, std::vector<atom_AO>> get_atom_basis_map(
         const PrimitiveShell *shells_ptr,
         int bsisnum,
-        const Atom *h_atoms, // 新增：需要原子信息来获取核电荷数
+        const Atom *h_atoms,
         int nAtom)
     {
         std::map<int, std::vector<atom_AO>> atom_basis_map;
 
-        // 先建立 atom_index -> atomic_number 的映射
+        // 建立 atom_index -> atomic_number 的映射
         std::map<int, int> atom_idx_to_charge;
+        std::set<int> processed_elements; // 记录已处理的元素
+
         for (int i = 0; i < nAtom; i++)
         {
             atom_idx_to_charge[i] = h_atoms[i].atomic_number;
         }
 
-        // Temporary storage: atomic_number -> (basis_index, shell_type) -> list of (exp, coeff)
+        // Temporary storage: atom_index -> (basis_index, shell_type) -> list of (exp, coeff)
+        // 关键：必须保留 basis_index！
         std::map<int, std::map<std::pair<int, int>, std::vector<std::pair<double, double>>>> temp_map;
 
-        // First pass: group primitives by atomic_number, basis_index, and shell_type
+        // First pass: group primitives by atom_index, basis_index, and shell_type
         for (int i = 0; i < bsisnum; i++)
         {
             int atom_idx = shells_ptr[i].atom_index;
-            int atomic_number = atom_idx_to_charge[atom_idx]; // 使用核电荷数
             int basis_idx = shells_ptr[i].basis_index;
             int shell_type = shells_ptr[i].shell_type;
             double exp = shells_ptr[i].exponent;
             double coeff = shells_ptr[i].coefficient;
 
             std::pair<int, int> key = {basis_idx, shell_type};
-            temp_map[atomic_number][key].push_back({exp, coeff});
+            temp_map[atom_idx][key].push_back({exp, coeff});
         }
 
-        // Second pass: convert to final format
+        // Second pass: 对于每个元素，只处理第一个该元素的原子
         for (auto &atom_pair : temp_map)
         {
-            int atomic_number = atom_pair.first; // 现在是核电荷数
+            int atom_idx = atom_pair.first;
+            int atomic_number = atom_idx_to_charge[atom_idx];
+
+            // 如果这个元素已经处理过，跳过
+            if (processed_elements.count(atomic_number) > 0)
+            {
+                std::cout << "Skipping atom_idx=" << atom_idx
+                          << " (Z=" << atomic_number << ") - already processed\n";
+                continue;
+            }
+            processed_elements.insert(atomic_number);
+
+            std::cout << "Processing atom_idx=" << atom_idx
+                      << " (Z=" << atomic_number << ")\n";
+
             std::vector<atom_AO> aos;
 
             // Sort by basis_index to maintain order
@@ -1184,10 +1201,16 @@ namespace gansu::dft
 
             for (auto &basis_pair : sorted_by_basis)
             {
+                int basis_idx = basis_pair.first;
+                std::cout << "  basis_index=" << basis_idx << "\n";
+
                 for (auto &shell_data : basis_pair.second)
                 {
                     atom_AO ao;
                     ao.l = shell_data.first; // shell_type
+
+                    std::cout << "    shell_type=" << ao.l
+                              << ", nprim=" << shell_data.second.size() << "\n";
 
                     // Extract exponents and coefficients
                     for (auto &prim : shell_data.second)
@@ -1201,6 +1224,18 @@ namespace gansu::dft
             }
 
             atom_basis_map[atomic_number] = aos;
+            std::cout << "  Total shells for Z=" << atomic_number << ": " << aos.size() << "\n\n";
+        }
+
+        std::cout << "\n========== Final Basis Set Summary ==========\n";
+        for (const auto &pair : atom_basis_map)
+        {
+            std::cout << "Element Z=" << pair.first << ": " << pair.second.size() << " shells\n";
+            for (size_t i = 0; i < pair.second.size(); i++)
+            {
+                std::cout << "  Shell " << i << ": l=" << pair.second[i].l
+                          << ", nprim=" << pair.second[i].exps.size() << "\n";
+            }
         }
 
         return atom_basis_map;
@@ -1256,7 +1291,6 @@ namespace gansu::dft
         return normed_basis;
     }
 
-    // 使用示例
     std::vector<std::array<int, 3>> generate_cartesian_components(int l)
     {
         std::vector<std::array<int, 3>> components;
@@ -1330,6 +1364,143 @@ namespace gansu::dft
         return ao_list;
     }
 
+    // 调试版本
+    std::vector<AODesc> generate_ao_list_debug(
+        const std::map<int, std::vector<atom_AO>> &normed_bas,
+        const std::vector<int> &charges,
+        const std::vector<std::array<double, 3>> &atom_coords)
+    {
+        std::vector<AODesc> ao_list;
+
+        if (charges.size() != atom_coords.size())
+        {
+            throw std::invalid_argument("charges and atom_coords size mismatch");
+        }
+
+        std::cout << "\n========== Basis Set Analysis ==========\n";
+
+        // 先打印基组信息
+        for (const auto &pair : normed_bas)
+        {
+            int Z = pair.first;
+            const auto &shells = pair.second;
+            std::cout << "Element Z=" << Z << " has " << shells.size() << " shells:\n";
+            for (size_t i = 0; i < shells.size(); i++)
+            {
+                std::cout << "  Shell " << i << ": l=" << shells[i].l
+                          << ", nprim=" << shells[i].exps.size() << std::endl;
+            }
+        }
+
+        std::cout << "\n========== Generating AO List ==========\n";
+
+        for (size_t atom_idx = 0; atom_idx < charges.size(); ++atom_idx)
+        {
+            int charge = charges[atom_idx];
+
+            std::cout << "\nAtom " << atom_idx << " (Z=" << charge << "):" << std::endl;
+
+            auto it = normed_bas.find(charge);
+            if (it == normed_bas.end())
+            {
+                throw std::runtime_error("No basis set found for element with charge " +
+                                         std::to_string(charge));
+            }
+
+            const std::vector<atom_AO> &basis_shells = it->second;
+
+            for (size_t shell_idx = 0; shell_idx < basis_shells.size(); shell_idx++)
+            {
+                const atom_AO &shell = basis_shells[shell_idx];
+                int l = shell.l;
+
+                std::vector<std::array<int, 3>> cart_components =
+                    generate_cartesian_components(l);
+
+                std::cout << "  Shell " << shell_idx << " (l=" << l << "): "
+                          << cart_components.size() << " Cartesian components" << std::endl;
+
+                for (const auto &comp : cart_components)
+                {
+                    std::cout << "    -> AO " << ao_list.size()
+                              << ": (" << comp[0] << "," << comp[1] << "," << comp[2] << ")"
+                              << std::endl;
+
+                    AODesc ao;
+                    ao.atom = atom_idx;
+                    ao.l = l;
+                    ao.lx = comp[0];
+                    ao.ly = comp[1];
+                    ao.lz = comp[2];
+                    ao.exps = shell.exps;
+                    ao.coeffs = shell.coeffs;
+
+                    ao_list.push_back(ao);
+                }
+            }
+        }
+
+        std::cout << "\n========== Summary ==========\n";
+        std::cout << "Total AO functions: " << ao_list.size() << std::endl;
+
+        return ao_list;
+    }
+    void save_ao_to_txt(const double *ao_values, int ngrids, int nao,
+                        const std::string &filename)
+    {
+        std::ofstream outfile(filename);
+
+        if (!outfile.is_open())
+        {
+            throw std::runtime_error("Failed to open file: " + filename);
+        }
+
+        // 设置输出精度
+        outfile << std::scientific << std::setprecision(16);
+
+        // 写入维度信息作为注释
+        outfile << "# ngrids = " << ngrids << "\n";
+        outfile << "# nao = " << nao << "\n";
+        outfile << "# Format: ngrids x nao (row-major)\n";
+
+        // 写入数据：每行是一个网格点的所有 AO 值
+        for (int i = 0; i < ngrids; i++)
+        {
+            for (int j = 0; j < nao; j++)
+            {
+                outfile << ao_values[i * nao + j];
+                if (j < nao - 1)
+                    outfile << " ";
+            }
+            outfile << "\n";
+        }
+
+        outfile.close();
+        std::cout << "AO values saved to " << filename << std::endl;
+        std::cout << "Shape: (" << ngrids << ", " << nao << ")" << std::endl;
+    }
+    void save_grids_to_txt(const std::vector<std::array<double, 3>> &coords,
+                           const std::string &filename)
+    {
+        std::ofstream outfile(filename);
+
+        if (!outfile.is_open())
+        {
+            throw std::runtime_error("Failed to open file: " + filename);
+        }
+
+        outfile << std::scientific << std::setprecision(16);
+        outfile << "# ngrids = " << coords.size() << "\n";
+        outfile << "# Format: x y z (one point per line)\n";
+
+        for (const auto &coord : coords)
+        {
+            outfile << coord[0] << " " << coord[1] << " " << coord[2] << "\n";
+        }
+
+        outfile.close();
+        std::cout << "Grid coordinates saved to " << filename << std::endl;
+    }
     AOGrids dft_gen_ao(std::map<int, std::vector<atom_AO>> normed_bas, std::vector<int> charges, std::vector<std::array<double, 3>> &atm_coords, std::vector<std::array<double, 3>> coords)
     {
 
@@ -1338,15 +1509,22 @@ namespace gansu::dft
             std::cout << it->first << std::endl; // 输出键
         }
 
-        std::vector<AODesc> AODESC = generate_ao_list(normed_bas, charges, atm_coords);
+        std::vector<AODesc> AODESC = generate_ao_list_debug(normed_bas, charges, atm_coords);
         int ngrids = static_cast<int>(coords.size());
         int nao = static_cast<int>(AODESC.size());
+        printf("Total AO count: %d\n", nao);
+        printf("values size: %d x %d \n", ngrids, nao);
         double *ao_values = new double[ngrids * nao];
+        printf("Evaluating AOs on grids using GPU...\n");
         chemgrid::evaluate_aos_on_grids_gpu_raw(AODESC, atm_coords, coords, ao_values, ngrids, nao);
         AOGrids outAO;
         outAO.ao = ao_values;
         outAO.naos = nao;
         outAO.ngrids = ngrids;
+        const std::string &output_prefix = "ao_output"; // 你可以根据需要修改这个前缀
+        save_ao_to_txt(ao_values, ngrids, nao, output_prefix + "_ao_values.txt");
+        save_grids_to_txt(coords, output_prefix + "_grids.txt");
+        
         return outAO;
     }
 }

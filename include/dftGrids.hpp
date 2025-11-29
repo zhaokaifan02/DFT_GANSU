@@ -673,7 +673,7 @@ namespace gansu::dft
     std::map<int, std::vector<atom_AO>> get_normalized_atom_basis(
         const PrimitiveShell *shells_ptr,
         int bsisnum,
-        const Atom *h_atoms, // 新增参数
+        const Atom *h_atoms, // 
         int nAtom);
     AOGrids dft_gen_ao(std::map<int, std::vector<atom_AO>> basis, std::vector<int> charges, std::vector<std::array<double, 3>> &atm_coords, std::vector<std::array<double, 3>> coords);
 
