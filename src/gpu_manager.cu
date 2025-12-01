@@ -2552,31 +2552,31 @@ namespace gansu::gpu
             gansu::dft::get_normalized_atom_basis(shells_ptr, bsisnum,h_atoms,nAtom);
 
         // 打印归一化后的结果
-        std::cout << "\n========== Normalized Basis Functions ==========\n";
-        for (const auto &atom_pair : normed_atom_basis)
-        {
-            int atom_idx = atom_pair.first;
-            std::cout << "Atom " << atom_idx
-                      << " (Z=" << charges[atom_idx] << ")"
-                      << " at (" << atm_coords[atom_idx][0] << ", "
-                      << atm_coords[atom_idx][1] << ", "
-                      << atm_coords[atom_idx][2] << "):" << std::endl;
+        // std::cout << "\n========== Normalized Basis Functions ==========\n";
+        // for (const auto &atom_pair : normed_atom_basis)
+        // {
+        //     int atom_idx = atom_pair.first;
+        //     std::cout << "Atom " << atom_idx
+        //               << " (Z=" << charges[atom_idx] << ")"
+        //               << " at (" << atm_coords[atom_idx][0] << ", "
+        //               << atm_coords[atom_idx][1] << ", "
+        //               << atm_coords[atom_idx][2] << "):" << std::endl;
 
-            for (size_t ao_idx = 0; ao_idx < atom_pair.second.size(); ao_idx++)
-            {
-                const atom_AO &ao = atom_pair.second[ao_idx];
-                std::cout << "  AO " << ao_idx << " (l=" << ao.l << "):" << std::endl;
-                std::cout << "    Exponents:    ";
-                for (double exp : ao.exps)
-                    std::cout << std::setw(12) << std::setprecision(6) << exp << " ";
-                std::cout << std::endl;
-                std::cout << "    Coefficients: ";
-                for (double coeff : ao.coeffs)
-                    std::cout << std::setw(12) << std::setprecision(6) << coeff << " ";
-                std::cout << std::endl;
-            }
-            std::cout << std::endl;
-        }
+        //     for (size_t ao_idx = 0; ao_idx < atom_pair.second.size(); ao_idx++)
+        //     {
+        //         const atom_AO &ao = atom_pair.second[ao_idx];
+        //         std::cout << "  AO " << ao_idx << " (l=" << ao.l << "):" << std::endl;
+        //         std::cout << "    Exponents:    ";
+        //         for (double exp : ao.exps)
+        //             std::cout << std::setw(12) << std::setprecision(6) << exp << " ";
+        //         std::cout << std::endl;
+        //         std::cout << "    Coefficients: ";
+        //         for (double coeff : ao.coeffs)
+        //             std::cout << std::setw(12) << std::setprecision(6) << coeff << " ";
+        //         std::cout << std::endl;
+        //     }
+        //     std::cout << std::endl;
+        // }
         grids = dft::dft_gen_grid(charges,atm_coords);
         aoGrids = dft::dft_gen_ao(normed_atom_basis,charges,atm_coords,grids.first);
         // create Grids

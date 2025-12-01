@@ -663,9 +663,48 @@ namespace gansu::dft::chemgrid
         double *out_ao_values, // ← Output: pointer provided by the caller
         int ngrids,
         int nao);
-
+    void evaluate_aos_on_grids_gpu_grouped(
+        const std::vector<AODesc> &ao_list,
+        const std::vector<std::array<double, 3>> &atom_coords,
+        const std::vector<std::array<double, 3>> &grid_coords,
+        double *out_ao_values, // [nao x ngrids] 输出
+        int ngrids,
+        int nao);
 }
 // output API
+struct AngularMomentumKey
+{
+    int lx, ly, lz;
+
+    bool operator<(const AngularMomentumKey &other) const
+    {
+        if (lx != other.lx)
+            return lx < other.lx;
+        if (ly != other.ly)
+            return ly < other.ly;
+        return lz < other.lz;
+    }
+
+    bool operator==(const AngularMomentumKey &other) const
+    {
+        return lx == other.lx && ly == other.ly && lz == other.lz;
+    }
+};
+
+// ============================================================
+// 分组后的 AO 数据结构 (用于传输到 GPU)
+// ============================================================
+struct AOGroupData
+{
+    int lx, ly, lz;                 // 该组的角动量
+    std::vector<int> ao_indices;    // 原始 AO 索引列表
+    std::vector<int> atom_indices;  // 每个 AO 对应的原子索引
+    std::vector<int> prim_offsets;  // 每个 AO 的 primitive 起始偏移
+    std::vector<int> prim_counts;   // 每个 AO 的 primitive 数量
+    std::vector<double> all_exps;   // 所有 exponents 打包
+    std::vector<double> all_coeffs; // 所有 coefficients 打包
+};
+
 namespace gansu::dft
 {
 
@@ -673,7 +712,7 @@ namespace gansu::dft
     std::map<int, std::vector<atom_AO>> get_normalized_atom_basis(
         const PrimitiveShell *shells_ptr,
         int bsisnum,
-        const Atom *h_atoms, // 
+        const Atom *h_atoms, //
         int nAtom);
     AOGrids dft_gen_ao(std::map<int, std::vector<atom_AO>> basis, std::vector<int> charges, std::vector<std::array<double, 3>> &atm_coords, std::vector<std::array<double, 3>> coords);
 

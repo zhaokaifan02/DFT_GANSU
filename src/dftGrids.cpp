@@ -1517,6 +1517,7 @@ namespace gansu::dft
         double *ao_values = new double[ngrids * nao];
         printf("Evaluating AOs on grids using GPU...\n");
         chemgrid::evaluate_aos_on_grids_gpu_raw(AODESC, atm_coords, coords, ao_values, ngrids, nao);
+        chemgrid::evaluate_aos_on_grids_gpu_grouped(AODESC, atm_coords, coords, ao_values, ngrids, nao);
         AOGrids outAO;
         outAO.ao = ao_values;
         outAO.naos = nao;
@@ -1524,7 +1525,10 @@ namespace gansu::dft
         const std::string &output_prefix = "ao_output"; // 你可以根据需要修改这个前缀
         save_ao_to_txt(ao_values, ngrids, nao, output_prefix + "_ao_values.txt");
         save_grids_to_txt(coords, output_prefix + "_grids.txt");
-        
+
         return outAO;
     }
+
+
+
 }

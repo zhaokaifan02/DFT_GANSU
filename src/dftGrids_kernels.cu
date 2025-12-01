@@ -508,4 +508,286 @@ namespace gansu::dft::chemgrid
         std::cout << "GPU evaluation completed!\n";
     }
 
+    // ============================================================
+    // CUDA Kernel: 处理同一角动量类型的所有 AO
+    // 每个 block 处理一批 grid points，所有 AO 在循环中处理
+    // ============================================================
+    __global__ void evaluate_ao_group_kernel(
+        double *__restrict__ ao_values,         // [nao x ngrids] 输出矩阵
+        const double *__restrict__ grid_coords, // [ngrids x 3] 格点坐标
+        const double *__restrict__ atom_coords, // [natoms x 3] 原子坐标
+        const int *__restrict__ ao_indices,     // 该组中每个 AO 的原始索引
+        const int *__restrict__ atom_indices,   // 该组中每个 AO 对应的原子
+        const int *__restrict__ prim_offsets,   // primitive 偏移
+        const int *__restrict__ prim_counts,    // primitive 数量
+        const double *__restrict__ all_exps,    // 所有 exponents
+        const double *__restrict__ all_coeffs,  // 所有 coefficients
+        int lx, int ly, int lz,                 // 角动量 (该组共享)
+        int num_aos_in_group,                   // 该组的 AO 数量
+        int ngrids,                             // 格点总数
+        int nao)                                // AO 总数 (用于输出 stride)
+    {
+        int grid_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+        if (grid_idx >= ngrids)
+            return;
+
+        // 读取当前格点坐标
+        double gx = grid_coords[grid_idx * 3 + 0];
+        double gy = grid_coords[grid_idx * 3 + 1];
+        double gz = grid_coords[grid_idx * 3 + 2];
+
+        // 遍历该组中的所有 AO
+        for (int i = 0; i < num_aos_in_group; ++i)
+        {
+            int ao_idx = ao_indices[i];
+            int atom_idx = atom_indices[i];
+
+            // 原子坐标
+            double ax = atom_coords[atom_idx * 3 + 0];
+            double ay = atom_coords[atom_idx * 3 + 1];
+            double az = atom_coords[atom_idx * 3 + 2];
+
+            // 相对坐标
+            double dx = gx - ax;
+            double dy = gy - ay;
+            double dz = gz - az;
+            double r2 = dx * dx + dy * dy + dz * dz;
+
+            // 角动量部分 (该组所有 AO 共享相同的 lx, ly, lz)
+            double angular = 1.0;
+            for (int ix = 0; ix < lx; ++ix)
+                angular *= dx;
+            for (int iy = 0; iy < ly; ++iy)
+                angular *= dy;
+            for (int iz = 0; iz < lz; ++iz)
+                angular *= dz;
+
+            // 径向部分：收缩高斯
+            double radial = 0.0;
+            int prim_start = prim_offsets[i];
+            int nprim = prim_counts[i];
+
+            for (int p = 0; p < nprim; ++p)
+            {
+                double alpha = all_exps[prim_start + p];
+                double coeff = all_coeffs[prim_start + p];
+                radial += coeff * exp(-alpha * r2);
+            }
+
+            // 写入结果: ao_values[ao_idx * ngrids + grid_idx]
+            // 或者 ao_values[grid_idx * nao + ao_idx] 取决于你的存储方式
+            // 这里假设是 [nao, ngrids] 布局 (ao-major)
+            ao_values[ao_idx * ngrids + grid_idx] = angular * radial;
+        }
+    }
+    // fan AOupdate
+    //  ============================================================
+    // Host 端函数：将 AO 按角动量类型分组
+    // ============================================================
+    inline std::map<AngularMomentumKey, AOGroupData> group_aos_by_angular_momentum(
+        const std::vector<AODesc> &ao_list)
+    {
+        std::map<AngularMomentumKey, AOGroupData> groups;
+
+        for (size_t ao_idx = 0; ao_idx < ao_list.size(); ++ao_idx)
+        {
+            const AODesc &ao = ao_list[ao_idx];
+            AngularMomentumKey key{ao.lx, ao.ly, ao.lz};
+
+            AOGroupData &group = groups[key];
+            group.lx = ao.lx;
+            group.ly = ao.ly;
+            group.lz = ao.lz;
+
+            // 记录 primitive 偏移
+            int offset = group.all_exps.size();
+            group.prim_offsets.push_back(offset);
+            group.prim_counts.push_back(ao.exps.size());
+
+            // 添加 AO 信息
+            group.ao_indices.push_back(ao_idx);
+            group.atom_indices.push_back(ao.atom);
+
+            // 打包 exponents 和 coefficients
+            for (double e : ao.exps)
+                group.all_exps.push_back(e);
+            for (double c : ao.coeffs)
+                group.all_coeffs.push_back(c);
+        }
+
+        return groups;
+    }
+
+    // ============================================================
+    // 主函数：按角动量类型分组的 GPU 评估
+    // ============================================================
+    void evaluate_aos_on_grids_gpu_grouped(
+        const std::vector<AODesc> &ao_list,
+        const std::vector<std::array<double, 3>> &atom_coords,
+        const std::vector<std::array<double, 3>> &grid_coords,
+        double *out_ao_values, // [nao x ngrids] 输出
+        int ngrids,
+        int nao)
+    {
+        if (nao != (int)ao_list.size())
+        {
+            throw std::invalid_argument("nao != ao_list.size()");
+        }
+        if (ngrids != (int)grid_coords.size())
+        {
+            throw std::invalid_argument("ngrids != grid_coords.size()");
+        }
+
+        std::cout << "=== Grouped GPU AO Evaluation ===" << std::endl;
+        std::cout << "Evaluating " << nao << " AOs on " << ngrids << " grid points...\n";
+
+        // Step 1: 按角动量分组
+        auto groups = group_aos_by_angular_momentum(ao_list);
+        std::cout << "Number of angular momentum groups: " << groups.size() << std::endl;
+
+        for (const auto &[key, group] : groups)
+        {
+            std::cout << "  Group (lx=" << key.lx << ", ly=" << key.ly
+                      << ", lz=" << key.lz << "): " << group.ao_indices.size()
+                      << " AOs" << std::endl;
+        }
+
+        // Step 2: 分配设备内存
+        size_t total_size = (size_t)ngrids * (size_t)nao * sizeof(double);
+        std::cout << "Total memory requirement: " << total_size / (1024.0 * 1024.0) << " MB\n";
+
+        double *d_ao_values;
+        cudaMalloc(&d_ao_values, total_size);
+        cudaMemset(d_ao_values, 0, total_size);
+
+        // 格点坐标
+        double *h_flat_grids = new double[ngrids * 3];
+        for (int i = 0; i < ngrids; ++i)
+        {
+            h_flat_grids[i * 3 + 0] = grid_coords[i][0];
+            h_flat_grids[i * 3 + 1] = grid_coords[i][1];
+            h_flat_grids[i * 3 + 2] = grid_coords[i][2];
+        }
+        double *d_grid_coords;
+        cudaMalloc(&d_grid_coords, ngrids * 3 * sizeof(double));
+        cudaMemcpy(d_grid_coords, h_flat_grids, ngrids * 3 * sizeof(double), cudaMemcpyHostToDevice);
+        delete[] h_flat_grids;
+
+        // 原子坐标
+        int natoms = atom_coords.size();
+        double *h_atom_coords = new double[natoms * 3];
+        for (int i = 0; i < natoms; ++i)
+        {
+            h_atom_coords[i * 3 + 0] = atom_coords[i][0];
+            h_atom_coords[i * 3 + 1] = atom_coords[i][1];
+            h_atom_coords[i * 3 + 2] = atom_coords[i][2];
+        }
+        double *d_atom_coords;
+        cudaMalloc(&d_atom_coords, natoms * 3 * sizeof(double));
+        cudaMemcpy(d_atom_coords, h_atom_coords, natoms * 3 * sizeof(double), cudaMemcpyHostToDevice);
+        delete[] h_atom_coords;
+
+        // Kernel 配置
+        int block_size = 256;
+        int grid_size = (ngrids + block_size - 1) / block_size;
+
+        // Step 3: 计时并执行每个分组的 kernel
+        cudaEvent_t start, stop;
+        float milliseconds = 0;
+        cudaEventCreate(&start);
+        cudaEventCreate(&stop);
+        cudaEventRecord(start);
+
+        int group_idx = 0;
+        for (const auto &[key, group] : groups)
+        {
+            int num_aos = group.ao_indices.size();
+            int num_prims = group.all_exps.size();
+
+            // 计算该组最大 primitive 数量 (用于 shared memory)
+            int max_prim = 0;
+            for (int c : group.prim_counts)
+            {
+                if (c > max_prim)
+                    max_prim = c;
+            }
+
+            // 分配该组的设备内存
+            int *d_ao_indices, *d_atom_indices, *d_prim_offsets, *d_prim_counts;
+            double *d_all_exps, *d_all_coeffs;
+
+            cudaMalloc(&d_ao_indices, num_aos * sizeof(int));
+            cudaMalloc(&d_atom_indices, num_aos * sizeof(int));
+            cudaMalloc(&d_prim_offsets, num_aos * sizeof(int));
+            cudaMalloc(&d_prim_counts, num_aos * sizeof(int));
+            cudaMalloc(&d_all_exps, num_prims * sizeof(double));
+            cudaMalloc(&d_all_coeffs, num_prims * sizeof(double));
+
+            cudaMemcpy(d_ao_indices, group.ao_indices.data(), num_aos * sizeof(int), cudaMemcpyHostToDevice);
+            cudaMemcpy(d_atom_indices, group.atom_indices.data(), num_aos * sizeof(int), cudaMemcpyHostToDevice);
+            cudaMemcpy(d_prim_offsets, group.prim_offsets.data(), num_aos * sizeof(int), cudaMemcpyHostToDevice);
+            cudaMemcpy(d_prim_counts, group.prim_counts.data(), num_aos * sizeof(int), cudaMemcpyHostToDevice);
+            cudaMemcpy(d_all_exps, group.all_exps.data(), num_prims * sizeof(double), cudaMemcpyHostToDevice);
+            cudaMemcpy(d_all_coeffs, group.all_coeffs.data(), num_prims * sizeof(double), cudaMemcpyHostToDevice);
+
+            // 计算 shared memory 大小
+            size_t shared_mem_size = 2 * max_prim * sizeof(double);
+
+            // 启动 kernel (使用 shared memory 优化版本)
+            evaluate_ao_group_kernel<<<grid_size, block_size>>>(
+                d_ao_values,
+                d_grid_coords,
+                d_atom_coords,
+                d_ao_indices,
+                d_atom_indices,
+                d_prim_offsets,
+                d_prim_counts,
+                d_all_exps,
+                d_all_coeffs,
+                group.lx, group.ly, group.lz,
+                num_aos,
+                ngrids,
+                nao);
+                
+            cudaGetLastError();
+
+            // 释放该组的临时内存
+            cudaFree(d_ao_indices);
+            cudaFree(d_atom_indices);
+            cudaFree(d_prim_offsets);
+            cudaFree(d_prim_counts);
+            cudaFree(d_all_exps);
+            cudaFree(d_all_coeffs);
+
+            std::cout << "  Completed group " << (group_idx + 1) << "/" << groups.size()
+                      << " (lx=" << key.lx << ", ly=" << key.ly << ", lz=" << key.lz
+                      << ", " << num_aos << " AOs)" << std::endl;
+            group_idx++;
+        }
+
+        cudaDeviceSynchronize();
+        cudaEventRecord(stop);
+        cudaEventSynchronize(stop);
+        cudaEventElapsedTime(&milliseconds, start, stop);
+
+        std::cout << "========================================" << std::endl;
+        std::cout << "Total kernel time: " << milliseconds << " ms" << std::endl;
+        std::cout << "Number of kernel launches: " << groups.size() << std::endl;
+        std::cout << "========================================" << std::endl;
+
+        cudaEventDestroy(start);
+        cudaEventDestroy(stop);
+
+        // Step 4: 复制结果回主机
+        std::cout << "Copying results back to CPU (" << total_size / (1024.0 * 1024.0) << " MB)...\n";
+        cudaMemcpy(out_ao_values, d_ao_values, total_size, cudaMemcpyDeviceToHost);
+
+        // 释放设备内存
+        cudaFree(d_grid_coords);
+        cudaFree(d_atom_coords);
+        cudaFree(d_ao_values);
+
+        std::cout << "Grouped GPU evaluation completed!\n";
+    }
 }
