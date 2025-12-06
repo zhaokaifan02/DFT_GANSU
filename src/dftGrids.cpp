@@ -1501,6 +1501,291 @@ namespace gansu::dft
         outfile.close();
         std::cout << "Grid coordinates saved to " << filename << std::endl;
     }
+    inline double get_spherical_norm_factor(int l)
+    {
+        // Precomputed values for common angular momenta
+        static const double fac_table[] = {
+            0.282094791773878143, // l=0: sqrt(1/(4π))
+            0.488602511902919921, // l=1: sqrt(3/(4π))
+            0.630783130505040012, // l=2: sqrt(5/(4π))
+            0.746352665180230783, // l=3: sqrt(7/(4π))
+            0.846284375321634481, // l=4: sqrt(9/(4π))
+            0.935414346693485387, // l=5: sqrt(11/(4π))
+            1.016220929899498370, // l=6: sqrt(13/(4π))
+        };
+
+        if (l >= 0 && l <= 6)
+        {
+            return fac_table[l];
+        }
+
+        // General formula for higher l
+        return std::sqrt((2.0 * l + 1.0) / (4.0 * M_PI));
+    }
+
+    inline double safe_power(double x, int n)
+    {
+        if (n < 0)
+            return 0.0; // x^(-1) 等情况返回 0
+        if (n == 0)
+            return 1.0;
+        if (n == 1)
+            return x;
+        if (n == 2)
+            return x * x;
+        if (n == 3)
+            return x * x * x;
+
+        double result = 1.0;
+        for (int i = 0; i < n; ++i)
+            result *= x;
+        return result;
+    }
+
+    inline void evaluate_ao_grad(
+        const std::vector<AODesc> &ao_list,
+        const std::vector<std::array<double, 3>> &atom_coords,
+        const std::vector<std::array<double, 3>> &grid_coords,
+        double *out_grad, // [3 x ngrids x nao]
+        int ngrids,
+        int nao)
+    {
+        std::fill(out_grad, out_grad + 3 * ngrids * nao, 0.0);
+
+        for (int ao_idx = 0; ao_idx < nao; ++ao_idx)
+        {
+            const AODesc &ao = ao_list[ao_idx];
+            const int lx = ao.lx;
+            const int ly = ao.ly;
+            const int lz = ao.lz;
+            const int l = ao.l;
+            const int nprim = ao.exps.size();
+
+            const double fac = get_spherical_norm_factor(l);
+
+            const double ax = atom_coords[ao.atom][0];
+            const double ay = atom_coords[ao.atom][1];
+            const double az = atom_coords[ao.atom][2];
+
+            for (int g = 0; g < ngrids; ++g)
+            {
+                const double dx = grid_coords[g][0] - ax;
+                const double dy = grid_coords[g][1] - ay;
+                const double dz = grid_coords[g][2] - az;
+                const double r2 = dx * dx + dy * dy + dz * dz;
+
+                // Contracted sums
+                double ce = 0.0;    // Σ c_j * exp(-α_j * r²)
+                double ce_2a = 0.0; // Σ c_j * (-2α_j) * exp(-α_j * r²)
+
+                for (int p = 0; p < nprim; ++p)
+                {
+                    const double alpha = ao.exps[p];
+                    const double coeff = ao.coeffs[p];
+                    const double e = std::exp(-alpha * r2);
+                    ce += coeff * e;
+                    ce_2a += coeff * e * alpha;
+                }
+                ce *= fac;
+                ce_2a *= -2.0 * fac;
+
+                // Angular powers
+                const double dx_lx = safe_power(dx, lx);
+                const double dy_ly = safe_power(dy, ly);
+                const double dz_lz = safe_power(dz, lz);
+                const double dx_lx_m1 = safe_power(dx, lx - 1);
+                const double dy_ly_m1 = safe_power(dy, ly - 1);
+                const double dz_lz_m1 = safe_power(dz, lz - 1);
+
+                // Gradient formula:
+                // ∂φ/∂x = lx * dx^(lx-1) * dy^ly * dz^lz * ce
+                //       + dx^lx * dy^ly * dz^lz * ce_2a * dx
+                //       = dy^ly * dz^lz * (lx * dx^(lx-1) * ce + dx^(lx+1) * ce_2a)
+                const double common_yz = dy_ly * dz_lz;
+                const double common_xz = dx_lx * dz_lz;
+                const double common_xy = dx_lx * dy_ly;
+
+                const double grad_x = common_yz * (lx * dx_lx_m1 * ce + dx_lx * dx * ce_2a);
+                const double grad_y = common_xz * (ly * dy_ly_m1 * ce + dy_ly * dy * ce_2a);
+                const double grad_z = common_xy * (lz * dz_lz_m1 * ce + dz_lz * dz * ce_2a);
+
+                out_grad[0 * ngrids * nao + g * nao + ao_idx] = grad_x;
+                out_grad[1 * ngrids * nao + g * nao + ao_idx] = grad_y;
+                out_grad[2 * ngrids * nao + g * nao + ao_idx] = grad_z;
+            }
+        }
+    }
+
+    // ============================================================
+    // Evaluate both AO values and gradients (more efficient)
+    //
+    // Output:
+    //   out_ao:   double* [ngrids x nao] - AO values (can be nullptr)
+    //   out_grad: double* [3 x ngrids x nao] - gradients (can be nullptr)
+    //
+    // ============================================================
+    inline void evaluate_ao_and_grad(
+        const std::vector<AODesc> &ao_list,
+        const std::vector<std::array<double, 3>> &atom_coords,
+        const std::vector<std::array<double, 3>> &grid_coords,
+        double *out_ao,   // [ngrids x nao] or nullptr
+        double *out_grad, // [3 x ngrids x nao] or nullptr
+        int ngrids,
+        int nao)
+    {
+        if (nao != (int)ao_list.size())
+            throw std::invalid_argument("nao != ao_list.size()");
+
+        const bool compute_ao = (out_ao != nullptr);
+        const bool compute_grad = (out_grad != nullptr);
+
+        if (compute_ao)
+            std::fill(out_ao, out_ao + ngrids * nao, 0.0);
+        if (compute_grad)
+            std::fill(out_grad, out_grad + 3 * ngrids * nao, 0.0);
+
+        for (int ao_idx = 0; ao_idx < nao; ++ao_idx)
+        {
+            const AODesc &ao = ao_list[ao_idx];
+            const int lx = ao.lx;
+            const int ly = ao.ly;
+            const int lz = ao.lz;
+            const int nprim = ao.exps.size();
+
+            const double ax = atom_coords[ao.atom][0];
+            const double ay = atom_coords[ao.atom][1];
+            const double az = atom_coords[ao.atom][2];
+
+            for (int g = 0; g < ngrids; ++g)
+            {
+                const double gx = grid_coords[g][0];
+                const double gy = grid_coords[g][1];
+                const double gz = grid_coords[g][2];
+
+                const double dx = gx - ax;
+                const double dy = gy - ay;
+                const double dz = gz - az;
+                const double r2 = dx * dx + dy * dy + dz * dz;
+
+                // Contracted sums
+                double R0 = 0.0;
+                double R1 = 0.0;
+                for (int p = 0; p < nprim; ++p)
+                {
+                    const double alpha = ao.exps[p];
+                    const double coeff = ao.coeffs[p];
+                    const double exp_val = std::exp(-alpha * r2);
+                    R0 += coeff * exp_val;
+                    if (compute_grad)
+                        R1 += coeff * alpha * exp_val;
+                }
+
+                // Angular part
+                const double dx_lx = safe_power(dx, lx);
+                const double dy_ly = safe_power(dy, ly);
+                const double dz_lz = safe_power(dz, lz);
+                const double angular = dx_lx * dy_ly * dz_lz;
+
+                // AO value
+                if (compute_ao)
+                {
+                    out_ao[g * nao + ao_idx] = angular * R0;
+                }
+
+                // Gradients
+                if (compute_grad)
+                {
+                    const double dx_lx_m1 = safe_power(dx, lx - 1);
+                    const double dy_ly_m1 = safe_power(dy, ly - 1);
+                    const double dz_lz_m1 = safe_power(dz, lz - 1);
+
+                    const double common_yz = dy_ly * dz_lz;
+                    const double common_xz = dx_lx * dz_lz;
+                    const double common_xy = dx_lx * dy_ly;
+
+                    const double grad_x = common_yz * (lx * dx_lx_m1 * R0 - 2.0 * dx_lx * dx * R1);
+                    const double grad_y = common_xz * (ly * dy_ly_m1 * R0 - 2.0 * dy_ly * dy * R1);
+                    const double grad_z = common_xy * (lz * dz_lz_m1 * R0 - 2.0 * dz_lz * dz * R1);
+
+                    out_grad[0 * ngrids * nao + g * nao + ao_idx] = grad_x;
+                    out_grad[1 * ngrids * nao + g * nao + ao_idx] = grad_y;
+                    out_grad[2 * ngrids * nao + g * nao + ao_idx] = grad_z;
+                }
+            }
+        }
+    }
+
+    inline void export_ao_values_to_txt(
+        const double *ao_values, // [ngrids x nao]
+        int ngrids,
+        int nao,
+        const std::string &filename)
+    {
+        std::ofstream ofs(filename);
+        if (!ofs.is_open())
+            throw std::runtime_error("Cannot open file: " + filename);
+
+        ofs << "# AO values\n";
+        ofs << "# Shape: (" << ngrids << ", " << nao << ")\n";
+        ofs << "DIMS " << ngrids << " " << nao << "\n";
+
+        ofs << std::scientific << std::setprecision(15);
+
+        for (int g = 0; g < ngrids; ++g)
+        {
+            for (int ao = 0; ao < nao; ++ao)
+            {
+                ofs << ao_values[g * nao + ao];
+                if (ao < nao - 1)
+                    ofs << " ";
+            }
+            ofs << "\n";
+        }
+
+        ofs.close();
+        std::cout << "Exported AO values (" << ngrids << " x " << nao << ") to " << filename << std::endl;
+    }
+
+    // ============================================================
+    // Export AO gradients
+    // Format: DIMS 3 ngrids nao
+    //         (all grad_x data, then grad_y, then grad_z)
+    // ============================================================
+    inline void export_ao_grad_to_txt(
+        const double *ao_grad, // [3 x ngrids x nao]
+        int ngrids,
+        int nao,
+        const std::string &filename)
+    {
+        std::ofstream ofs(filename);
+        if (!ofs.is_open())
+            throw std::runtime_error("Cannot open file: " + filename);
+
+        ofs << "# AO gradients\n";
+        ofs << "# Shape: (3, " << ngrids << ", " << nao << ")\n";
+        ofs << "# Order: grad_x, grad_y, grad_z\n";
+        ofs << "DIMS 3 " << ngrids << " " << nao << "\n";
+
+        ofs << std::scientific << std::setprecision(15);
+
+        for (int d = 0; d < 3; ++d)
+        {
+            for (int g = 0; g < ngrids; ++g)
+            {
+                for (int ao = 0; ao < nao; ++ao)
+                {
+                    ofs << ao_grad[d * ngrids * nao + g * nao + ao];
+                    if (ao < nao - 1)
+                        ofs << " ";
+                }
+                ofs << "\n";
+            }
+        }
+
+        ofs.close();
+        std::cout << "Exported AO gradients (3 x " << ngrids << " x " << nao << ") to " << filename << std::endl;
+    }
+
     AOGrids dft_gen_ao(std::map<int, std::vector<atom_AO>> normed_bas, std::vector<int> charges, std::vector<std::array<double, 3>> &atm_coords, std::vector<std::array<double, 3>> coords)
     {
 
@@ -1509,26 +1794,26 @@ namespace gansu::dft
             std::cout << it->first << std::endl; // 输出键
         }
 
-        std::vector<AODesc> AODESC = generate_ao_list_debug(normed_bas, charges, atm_coords);
+        std::vector<AODesc> AODESC = generate_ao_list(normed_bas, charges, atm_coords);
         int ngrids = static_cast<int>(coords.size());
         int nao = static_cast<int>(AODESC.size());
         printf("Total AO count: %d\n", nao);
         printf("values size: %d x %d \n", ngrids, nao);
         double *ao_values = new double[ngrids * nao];
-        printf("Evaluating AOs on grids using GPU...\n");
-        chemgrid::evaluate_aos_on_grids_gpu_raw(AODESC, atm_coords, coords, ao_values, ngrids, nao);
-        chemgrid::evaluate_aos_on_grids_gpu_grouped(AODESC, atm_coords, coords, ao_values, ngrids, nao);
+        // printf("Evaluating AOs on grids using GPU...\n");
+        // chemgrid::evaluate_aos_on_grids_gpu_raw(AODESC, atm_coords, coords, ao_values, ngrids, nao);
+        chemgrid::evaluate_aos_gpu_shell_grouped(AODESC, atm_coords, coords, ao_values, ngrids, nao);
+        double *out_grad = new double[3 * ngrids * nao];
+        // printf("Evaluating AO gradients on grids using CPU...\n");
+        // evaluate_ao_grad(AODESC, atm_coords, coords, out_grad, ngrids, nao);
+        // // EXPORT TO TXT FOR DEBUGGING
+        // export_ao_values_to_txt(ao_values, ngrids, nao, "ao_values.txt");
+        // export_ao_grad_to_txt(out_grad, ngrids, nao, "ao_gradients.txt");
         AOGrids outAO;
         outAO.ao = ao_values;
         outAO.naos = nao;
         outAO.ngrids = ngrids;
-        const std::string &output_prefix = "ao_output"; // 你可以根据需要修改这个前缀
-        save_ao_to_txt(ao_values, ngrids, nao, output_prefix + "_ao_values.txt");
-        save_grids_to_txt(coords, output_prefix + "_grids.txt");
-
         return outAO;
     }
-
-
 
 }

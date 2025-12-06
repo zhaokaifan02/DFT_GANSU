@@ -663,11 +663,11 @@ namespace gansu::dft::chemgrid
         double *out_ao_values, // ← Output: pointer provided by the caller
         int ngrids,
         int nao);
-    void evaluate_aos_on_grids_gpu_grouped(
+    void evaluate_aos_gpu_shell_grouped(
         const std::vector<AODesc> &ao_list,
         const std::vector<std::array<double, 3>> &atom_coords,
         const std::vector<std::array<double, 3>> &grid_coords,
-        double *out_ao_values, // [nao x ngrids] 输出
+        double *out_ao_values, // [nao x ngrids]
         int ngrids,
         int nao);
 }
@@ -692,18 +692,22 @@ struct AngularMomentumKey
 };
 
 // ============================================================
-// 分组后的 AO 数据结构 (用于传输到 GPU)
+// Grouped Ao data for GPU evaluation
 // ============================================================
-struct AOGroupData
+struct ShellData
 {
-    int lx, ly, lz;                 // 该组的角动量
-    std::vector<int> ao_indices;    // 原始 AO 索引列表
-    std::vector<int> atom_indices;  // 每个 AO 对应的原子索引
-    std::vector<int> prim_offsets;  // 每个 AO 的 primitive 起始偏移
-    std::vector<int> prim_counts;   // 每个 AO 的 primitive 数量
-    std::vector<double> all_exps;   // 所有 exponents 打包
-    std::vector<double> all_coeffs; // 所有 coefficients 打包
+    int atom_idx;
+    int l;
+    double fac;                      // sqrt((2l+1)/(4π))
+    int nprim;
+    std::vector<double> exps;
+    std::vector<double> coeffs;
+    std::vector<int> ao_indices;     // Which AOs belong to this shell
+    std::vector<int> lx_list;        // lx for each AO
+    std::vector<int> ly_list;        // ly for each AO
+    std::vector<int> lz_list;        // lz for each AO
 };
+
 
 namespace gansu::dft
 {
