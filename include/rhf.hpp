@@ -749,7 +749,7 @@ public:
 
 
         // デバッグの際はPySCFとの比較でなく、Vxc計算の代わりに以下のcomputeKMatrix_DFT_RHF()を呼んだ時とエネルギーが一致するかを確認してください！！
-        // gpu::computeKMatrix_DFT_RHF(density_matrix.device_ptr(),d_V, shell_type_infos,shell_pair_type_infos,    primitive_shells.device_ptr(),     cgto_nomalization_factors.device_ptr(), primitive_shell_pair_indices.device_ptr(),num_basis_,boys_grid.device_ptr(),rhf_.get_schwarz_screening_threshold(),schwarz_upper_bound_factors.device_ptr(),verbose );
+        gpu::computeKMatrix_DFT_RHF(density_matrix.device_ptr(),d_V, shell_type_infos,shell_pair_type_infos,    primitive_shells.device_ptr(),     cgto_nomalization_factors.device_ptr(), primitive_shell_pair_indices.device_ptr(),num_basis_,boys_grid.device_ptr(),rhf_.get_schwarz_screening_threshold(),schwarz_upper_bound_factors.device_ptr(),verbose );
 
 
 
@@ -759,7 +759,7 @@ public:
 
 
 
-        //*
+        /*
         // ---------------------------------------------------- [DFT] Vxc計算の部分 (ここから) ----------------------------------------------------------------------------------------------------- //
         // メンバ変数aoGrids(ngrid, ao_cの情報)およびgrids(w_cの情報)を用いて計算してください！
         double* d_rho = nullptr;

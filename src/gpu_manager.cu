@@ -2525,6 +2525,40 @@ namespace gansu::gpu
         }
     }
 
+    inline void export_grids_to_txt(
+        const std::pair<std::vector<std::array<double, 3>>, std::vector<double>> &grids,
+        const std::string &filename)
+    {
+        const auto &coords = grids.first;
+        const auto &weights = grids.second;
+
+        if (coords.size() != weights.size())
+            throw std::invalid_argument("Grid coords and weights size mismatch");
+
+        std::ofstream ofs(filename);
+        if (!ofs.is_open())
+            throw std::runtime_error("Cannot open file: " + filename);
+
+        int ngrids = coords.size();
+
+        ofs << "# Grid coordinates and weights\n";
+        ofs << "# Format: x y z weight\n";
+        ofs << "NGRIDS " << ngrids << "\n";
+
+        ofs << std::scientific << std::setprecision(15);
+
+        for (int i = 0; i < ngrids; ++i)
+        {
+            ofs << coords[i][0] << " "
+                << coords[i][1] << " "
+                << coords[i][2] << " "
+                << weights[i] << "\n";
+        }
+
+        ofs.close();
+        std::cout << "Exported " << ngrids << " grid points to " << filename << std::endl;
+    }
+
     /* ---------------------------------------------------- [DFT] Gridで ---------------------------------------------------- */
 
     /* ---------------------------------------------------- [DFT] コンストラクタで使用する関数build() ---------------------------------------------------- */
@@ -2549,9 +2583,8 @@ namespace gansu::gpu
         // atom_basis
 
         std::map<int, std::vector<atom_AO>> normed_atom_basis =
-            gansu::dft::get_normalized_atom_basis(shells_ptr, bsisnum,h_atoms,nAtom);
+            gansu::dft::get_normalized_atom_basis(shells_ptr, bsisnum, h_atoms, nAtom);
 
-        // 打印归一化后的结果
         std::cout << "\n========== Normalized Basis Functions ==========\n";
         for (const auto &atom_pair : normed_atom_basis)
         {
@@ -2577,22 +2610,100 @@ namespace gansu::gpu
             }
             std::cout << std::endl;
         }
-        grids = dft::dft_gen_grid(charges,atm_coords);
-        aoGrids = dft::dft_gen_ao(normed_atom_basis,charges,atm_coords,grids.first);
+        grids = dft::dft_gen_grid(charges, atm_coords);
+        aoGrids = dft::dft_gen_ao(normed_atom_basis, charges, atm_coords, grids.first);
         // create Grids
     }
 
+#define CUDA_CHECK(call)                                                                         \
+    do                                                                                           \
+    {                                                                                            \
+        cudaError_t err = (call);                                                                \
+        if (err != cudaSuccess)                                                                  \
+        {                                                                                        \
+            std::cerr << "CUDA error at " << __FILE__ << ":" << __LINE__                         \
+                      << " code=" << err << " '" << cudaGetErrorString(err) << "'" << std::endl; \
+            std::exit(EXIT_FAILURE);                                                             \
+        }                                                                                        \
+    } while (0)
+
     void get_rho(const int nao, const int ngrids, const double *d_dm, const double *d_ao, double *d_rho)
     {
-        // lda.cuのget_rho()と同じインターフェースにしています！
-        THROW_EXCEPTION("Not implemented yet.");
+
+        const int BLOCK = 128;
+        int grid = (ngrids + BLOCK - 1) / BLOCK;
+
+        get_rho_kernel<<<grid, BLOCK>>>(nao, ngrids, d_dm, d_ao, d_rho);
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess)
+            throw std::runtime_error("get_rho kernel launch failed: " +
+                                     std::string(cudaGetErrorString(err)));
     }
 
     void build_vxc_matrix(const int nao, const int ngrids, const double *d_ao, std::vector<double> &weights_vector, double *d_rho, double *d_V)
     {
-        // lda.cuのbuild_vxc_matrix()と同じインターフェースにしています！
-        // weightsだけ、GPUでなくCPU上のメモリ(std::vector)なので注意してください！
-        THROW_EXCEPTION("Not implemented yet.");
+        if (weights_vector.size() != static_cast<size_t>(ngrids))
+            throw std::invalid_argument("weights_vector.size() != ngrids");
+
+        size_t free_byte = 0, total_byte = 0;
+        CUDA_CHECK(cudaMemGetInfo(&free_byte, &total_byte));
+        const size_t SAFE_FREE = static_cast<size_t>(free_byte * 0.9);
+        const size_t aux_buf = 64 * 1024 * 1024;
+        const size_t per_row = (nao + 3) * sizeof(double);
+        const size_t left_byte = (SAFE_FREE > aux_buf) ? (SAFE_FREE - aux_buf) : 0;
+        if (left_byte == 0)
+            throw std::runtime_error("Not enough GPU memory to tile build_vxc_matrix!");
+
+        size_t block_rows = left_byte / per_row;
+        if (block_rows < 1)
+            block_rows = 1;
+        if (block_rows > ngrids)
+            block_rows = ngrids;
+
+        double *d_ao_b = nullptr;
+        double *d_w_b = nullptr;
+        double *d_rho_b = nullptr;
+        double *d_vxc_b = nullptr;
+        CUDA_CHECK(cudaMalloc(&d_ao_b, block_rows * nao * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_w_b, block_rows * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_rho_b, block_rows * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_vxc_b, block_rows * sizeof(double)));
+
+        const size_t mat_size = static_cast<size_t>(nao) * nao * sizeof(double);
+        CUDA_CHECK(cudaMemset(d_V, 0, mat_size));
+
+        const int BLOCK = 256;
+        for (int g0 = 0; g0 < ngrids; g0 += block_rows)
+        {
+            int g1 = std::min(g0 + static_cast<int>(block_rows), ngrids);
+            int rows = g1 - g0;
+
+            CUDA_CHECK(cudaMemcpyAsync(d_ao_b, d_ao + static_cast<size_t>(g0) * nao,
+                                       rows * nao * sizeof(double),
+                                       cudaMemcpyDeviceToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(d_rho_b, d_rho + g0,
+                                       rows * sizeof(double),
+                                       cudaMemcpyDeviceToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(d_w_b, weights_vector.data() + g0,
+                                       rows * sizeof(double),
+                                       cudaMemcpyHostToDevice));
+
+            int grid_g = (rows + BLOCK - 1) / BLOCK;
+            lda_exc_vxc_kernel<<<grid_g, BLOCK>>>(rows, d_rho_b, nullptr, d_vxc_b, 0.0);
+            CUDA_CHECK(cudaGetLastError());
+
+            int N = rows * nao;
+            int grid = (N + BLOCK - 1) / BLOCK;
+            build_vxc_matrix_kernel<<<grid, BLOCK>>>(
+                nao, rows, g0, d_ao_b, d_w_b, d_vxc_b, d_V);
+            CUDA_CHECK(cudaGetLastError());
+            CUDA_CHECK(cudaDeviceSynchronize());
+        }
+
+        CUDA_CHECK(cudaFree(d_ao_b));
+        CUDA_CHECK(cudaFree(d_w_b));
+        CUDA_CHECK(cudaFree(d_rho_b));
+        CUDA_CHECK(cudaFree(d_vxc_b));
     }
 
 } // namespace gansu::gpu

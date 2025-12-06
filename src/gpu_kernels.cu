@@ -1304,4 +1304,133 @@ __global__ void MD_1T1SP_Direct_K(double* g_K, const double* g_density_matrix, c
     return;
 }
 
-} // namespace gansu::gpu
+
+__global__ void get_rho_kernel(int nao,
+                               int ngrids,
+                               const double *dm,   // (nao,nao)
+                               const double *ao,   // (ngrids,nao)
+                               double *rho_out)    // (ngrids)
+{
+    int g = blockIdx.x * blockDim.x + threadIdx.x;
+    if (g >= ngrids) return;
+
+    const double *phi_g = ao + (size_t)g * nao;
+    double r = 0.0;
+    for (int u = 0; u < nao; ++u) {
+        double phiu = phi_g[u];
+        const double *dm_row = dm + (size_t)u * nao;
+        for (int v = 0; v < nao; ++v)
+            r += dm_row[v] * phiu * phi_g[v];
+    }
+    rho_out[g] = r;
+}
+
+struct VWNPar {
+    double A, b, c, x0;
+};
+static const VWNPar vwn_param_host[2] = {
+    {0.0310907,  3.72744, 12.9352, -0.10498},   // ζ=0
+    {0.01554535, 7.06042, 18.0578, -0.32500}    // ζ=1
+};
+
+/* For device use, copy parameters to constant memory */
+__constant__ VWNPar vwn_param[2];
+
+/* ---------- device double atomicAdd fallback ---------- */
+__device__ inline double atomicAdd_double(double *address, double val) {
+#if __CUDA_ARCH__ >= 600
+    // On modern architectures, use hardware atomicAdd for double
+    return atomicAdd(address, val);
+#else
+    // Fallback implementation using atomicCAS on 64-bit integer representation
+    unsigned long long int* address_as_ull = (unsigned long long int*)address;
+    unsigned long long int old = *address_as_ull, assumed;
+    double old_val;
+    do {
+        assumed = old;
+        old_val = __longlong_as_double(assumed);
+        unsigned long long int new_val_ull = __double_as_longlong(old_val + val);
+        old = atomicCAS(address_as_ull, assumed, new_val_ull);
+    } while (assumed != old);
+    return __longlong_as_double(old);
+#endif
+}
+
+/* ---------- 1b. device math helpers ---------- */
+__device__ inline void vwn_ec_device(double x, const VWNPar &p, double &ec, double &dec_dx)
+{
+    const double X = x * x + p.b * x + p.c;
+    const double Q = sqrt(4.0 * p.c - p.b * p.b);
+    const double log_term  = log(x * x / X);
+    const double atan_term = 2.0 * p.b / Q * atan(Q / (2.0 * x + p.b));
+    const double x02 = p.x0 * p.x0;
+    const double denom = x02 + p.b * p.x0 + p.c;
+    const double corr  = p.b * p.x0 / denom *
+        (log((x - p.x0) * (x - p.x0) / X) +
+         2.0 * (2.0 * p.x0 + p.b) / Q * atan(Q / (2.0 * x + p.b)));
+    ec = p.A * (log_term + atan_term - corr);
+    dec_dx = p.A * (2.0 / x - (2.0 * x + p.b) / X -
+                    p.b * p.x0 / denom * (2.0 / (x - p.x0) - (2.0 * x + p.b) / X));
+}
+
+
+__global__ void lda_exc_vxc_kernel(int ngrid,
+                                   const double *rho,
+                                   double *exc,
+                                   double *vxc,
+                                   double  zeta)
+{
+    const double pi = 3.14159265358979323846;
+    const double Cx = 0.7385587663820224;
+
+    int g = blockIdx.x * blockDim.x + threadIdx.x;
+    if (g >= ngrid) return;
+
+    double r = rho[g];
+    if (r < 1e-300) r = 1e-300;
+    double rs = pow(3.0 / (4.0 * pi * r), 1.0 / 3.0);
+    double x  = sqrt(rs);
+
+    double ec0, dec0_dx, ec1, dec1_dx;
+    vwn_ec_device(x, vwn_param[0], ec0, dec0_dx);
+    vwn_ec_device(x, vwn_param[1], ec1, dec1_dx);
+
+    double z2 = zeta * zeta;
+    double ec     = ec0 + (ec1 - ec0) * z2;
+    double dec_dx = dec0_dx + (dec1_dx - dec0_dx) * z2;
+    double vc     = ec - rs / 3.0 * dec_dx / (2.0 * x);
+
+    double rho13 = pow(r, 1.0 / 3.0);
+    double ex    = -Cx * r * rho13;
+    double vx    = -4.0 / 3.0 * Cx * rho13;
+
+    if (exc) exc[g] = ex + r * ec;
+    if (vxc) vxc[g] = vx + vc;
+}
+
+__global__ void build_vxc_matrix_kernel(int nao,
+                                        int rows,        
+                                        int g0,         
+                                        const double *ao_b,   
+                                        const double *w_b,    
+                                        const double *vxc_b,  
+                                        double *vxc_mat)      
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= rows * nao) return;
+
+    int im = idx / nao;         
+    int i  = idx % nao;          
+    int g  = g0 + im;            
+
+    double aoi = ao_b[im * nao + i];
+    double w   = w_b[im];
+    double vxc = vxc_b[im];
+
+    for (int j = 0; j < nao; ++j) {
+        double aoj = ao_b[im * nao + j];
+        double contrib = w * vxc * aoi * aoj;
+        atomicAdd_double(&vxc_mat[i * nao + j], contrib);
+    }
+}
+} // namespace gpu

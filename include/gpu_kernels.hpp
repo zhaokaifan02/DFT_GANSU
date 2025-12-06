@@ -64,5 +64,9 @@ __global__ void computeFockMatrix_DFT_kernel(const double* d_core_hamiltonian_ma
 __global__ void MD_1T1SP_Direct_K(double* g_K, const double* g_density_matrix, const PrimitiveShell* g_shell, const size_t2* d_primitive_shell_pair_indices, const real_t* g_cgto_normalization_factors,  const ShellTypeInfo shell_s0, const ShellTypeInfo shell_s1, const ShellTypeInfo shell_s2, const ShellTypeInfo shell_s3, const size_t num_threads, const real_t swartz_screening_threshold, const double* g_upper_bound_factors, const int num_basis, const double* g_boys_grid, const size_t head_bra, const size_t head_ket);
 __global__ void MD_1T1SP_Direct_J(double* g_J, const double* g_density_matrix, const PrimitiveShell* g_shell, const size_t2* d_primitive_shell_pair_indices, const real_t* g_cgto_normalization_factors,  const ShellTypeInfo shell_s0, const ShellTypeInfo shell_s1, const ShellTypeInfo shell_s2, const ShellTypeInfo shell_s3, const size_t num_threads, const real_t swartz_screening_threshold, const double* g_upper_bound_factors, const int num_basis, const double* g_boys_grid, const size_t head_bra, const size_t head_ket);
 
+__global__ void get_rho_kernel(int nao, int ngrids, const double *dm, const double *ao, double *rho_out);
+__global__ void build_vxc_matrix_kernel(int nao, int rows, int g0, const double *ao_b, const double *w_b, const double *vxc_b, double *vxc_mat);
+__global__ void lda_exc_vxc_kernel(int ngrid, const double *rho, double *exc, double *vxc, double  zeta);
+
 
 } // namespace gansu::gpu
