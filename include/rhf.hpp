@@ -749,7 +749,8 @@ public:
 
 
         // デバッグの際はPySCFとの比較でなく、Vxc計算の代わりに以下のcomputeKMatrix_DFT_RHF()を呼んだ時とエネルギーが一致するかを確認してください！！
-        gpu::computeKMatrix_DFT_RHF(density_matrix.device_ptr(),d_V, shell_type_infos,shell_pair_type_infos,    primitive_shells.device_ptr(),     cgto_nomalization_factors.device_ptr(), primitive_shell_pair_indices.device_ptr(),num_basis_,boys_grid.device_ptr(),rhf_.get_schwarz_screening_threshold(),schwarz_upper_bound_factors.device_ptr(),verbose );
+        // NOTE: K行列はデバッグ用です。実際のDFT計算ではVxcを使用するため、以下の行はコメントアウトしています。
+        // gpu::computeKMatrix_DFT_RHF(density_matrix.device_ptr(),d_V, shell_type_infos,shell_pair_type_infos,    primitive_shells.device_ptr(),     cgto_nomalization_factors.device_ptr(), primitive_shell_pair_indices.device_ptr(),num_basis_,boys_grid.device_ptr(),rhf_.get_schwarz_screening_threshold(),schwarz_upper_bound_factors.device_ptr(),verbose );
 
 
 
@@ -759,11 +760,68 @@ public:
 
 
 
-        /*
+
         // ---------------------------------------------------- [DFT] Vxc計算の部分 (ここから) ----------------------------------------------------------------------------------------------------- //
         // メンバ変数aoGrids(ngrid, ao_cの情報)およびgrids(w_cの情報)を用いて計算してください！
+
+        // デバッグ: aoGrids の初期化状態をチェック
+        std::cout << "[DEBUG] aoGrids.ngrids = " << aoGrids.ngrids << std::endl;
+        std::cout << "[DEBUG] aoGrids.naos = " << aoGrids.naos << std::endl;
+        std::cout << "[DEBUG] aoGrids.ao = " << (void*)aoGrids.ao << std::endl;
+        std::cout << "[DEBUG] grids.second.size() = " << grids.second.size() << std::endl;
+
+        if (aoGrids.ao == nullptr) {
+            THROW_EXCEPTION("aoGrids.ao is nullptr! DFT grids not initialized properly.");
+        }
+        if (aoGrids.ngrids == 0 || aoGrids.naos == 0) {
+            THROW_EXCEPTION("aoGrids not initialized: ngrids=" + std::to_string(aoGrids.ngrids) +
+                          ", naos=" + std::to_string(aoGrids.naos));
+        }
+
+        // 修正: aoGrids.ao は CPU メモリなので、GPU にコピーする必要があります
+        double* d_ao = nullptr;
         double* d_rho = nullptr;
-        cudaMalloc((void**)d_rho, sizeof(double) * aoGrids.ngrids);
+        size_t ao_size = static_cast<size_t>(aoGrids.ngrids) * static_cast<size_t>(aoGrids.naos);
+        std::cout << "[DEBUG] Allocating GPU memory for AO: " << ao_size * sizeof(double) / (1024.0*1024.0) << " MB" << std::endl;
+
+        cudaError_t err = cudaMalloc((void**)&d_ao, sizeof(double) * ao_size);
+        if (err != cudaSuccess) {
+            THROW_EXCEPTION("cudaMalloc for d_ao failed: " + std::string(cudaGetErrorString(err)));
+        }
+
+        // 检查 aoGrids.ao 的前几个值
+        std::cout << "[DEBUG] First few values of aoGrids.ao:" << std::endl;
+        for (int i = 0; i < std::min(10, (int)ao_size); ++i) {
+            std::cout << "  aoGrids.ao[" << i << "] = " << aoGrids.ao[i] << std::endl;
+        }
+
+        std::cout << "[DEBUG] Copying " << ao_size << " doubles from CPU to GPU..." << std::endl;
+        err = cudaMemcpy(d_ao, aoGrids.ao, sizeof(double) * ao_size, cudaMemcpyHostToDevice);
+        std::cout << "[DEBUG] cudaMemcpy returned: " << cudaGetErrorString(err) << std::endl;
+
+        if (err != cudaSuccess) {
+            cudaFree(d_ao);
+            THROW_EXCEPTION("cudaMemcpy for d_ao failed: " + std::string(cudaGetErrorString(err)));
+        }
+        std::cout << "[DEBUG] d_ao = " << (void*)d_ao << " (GPU pointer)" << std::endl;
+
+        // 同步 GPU 并检查是否有之前的错误
+        cudaDeviceSynchronize();
+        err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            std::cout << "[ERROR] CUDA error before get_rho: " << cudaGetErrorString(err) << std::endl;
+            cudaFree(d_ao);
+            if (d_rho != nullptr) cudaFree(d_rho);
+            THROW_EXCEPTION("CUDA error detected before get_rho: " + std::string(cudaGetErrorString(err)));
+        }
+        std::cout << "[DEBUG] No CUDA errors before get_rho" << std::endl;
+
+        // 分配 d_rho 内存
+        err = cudaMalloc((void**)&d_rho, sizeof(double) * aoGrids.ngrids);
+        if (err != cudaSuccess) {
+            cudaFree(d_ao);
+            THROW_EXCEPTION("cudaMalloc for d_rho failed: " + std::string(cudaGetErrorString(err)));
+        }
         cudaMemset(d_rho, 0.0, sizeof(double) * aoGrids.ngrids);
         std::vector<double>& weights = grids.second;
 
@@ -772,17 +830,93 @@ public:
         // lda.cuのget_rho()と同じインターフェースにしています！
         // [第1引数] num_basis ... 軌道(基底関数)の数(naoに該当)
         // [第3引数] density_matrix.device_ptr() ... GPU上の密度行列配列へのポインタ(dmに該当)
-        // [第4引数] aoGrids.ao ... aoに該当する配列(GPUメモリへのポインタを仮定)
-        gpu::get_rho(num_basis_, aoGrids.ngrids, density_matrix.device_ptr(), aoGrids.ao, d_rho);
+        // [第4引数] d_ao ... GPU上のAO配列へのポインタ
+
+        std::cout << "[DEBUG] Calling get_rho with:" << std::endl;
+        std::cout << "[DEBUG]   nao (aoGrids.naos) = " << aoGrids.naos << std::endl;
+        std::cout << "[DEBUG]   num_basis_ = " << num_basis_ << std::endl;
+        std::cout << "[DEBUG]   ngrids = " << aoGrids.ngrids << std::endl;
+        std::cout << "[DEBUG]   dm = " << (void*)density_matrix.device_ptr() << std::endl;
+        std::cout << "[DEBUG]   ao = " << (void*)d_ao << std::endl;
+        std::cout << "[DEBUG]   rho = " << (void*)d_rho << std::endl;
+
+        // 警告: 如果 num_basis_ != aoGrids.naos，需要使用正确的维度
+        if (num_basis_ != aoGrids.naos) {
+            std::cout << "[WARNING] num_basis_ (" << num_basis_ << ") != aoGrids.naos (" << aoGrids.naos << ")" << std::endl;
+            std::cout << "[WARNING] This may cause issues if density matrix size doesn't match AO grid size" << std::endl;
+        }
+
+        // 检查 density_matrix 是否在 GPU 上
+        cudaPointerAttributes dm_attrs;
+        err = cudaPointerGetAttributes(&dm_attrs, density_matrix.device_ptr());
+        if (err != cudaSuccess) {
+            std::cout << "[ERROR] cudaPointerGetAttributes for density_matrix failed: "
+                     << cudaGetErrorString(err) << std::endl;
+            cudaGetLastError(); // 清除错误
+        } else {
+            std::cout << "[DEBUG] density_matrix pointer type: "
+                     << (dm_attrs.type == cudaMemoryTypeDevice ? "Device" :
+                         dm_attrs.type == cudaMemoryTypeHost ? "Host" : "Unknown") << std::endl;
+        }
+
+        // 重要: get_rho の第1引数は aoGrids.naos であるべき！
+        std::cout << "[DEBUG] About to call get_rho..." << std::endl;
+        gpu::get_rho(aoGrids.naos, aoGrids.ngrids, density_matrix.device_ptr(), d_ao, d_rho);
+
+        err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            std::cout << "[ERROR] get_rho failed with: " << cudaGetErrorString(err) << std::endl;
+            throw std::runtime_error("get_rho kernel launch failed: " + std::string(cudaGetErrorString(err)));
+        }
+        std::cout << "[DEBUG] get_rho completed successfully" << std::endl;
+
+        // 检查 d_rho 的前几个值
+        std::vector<double> h_rho(aoGrids.ngrids);
+        cudaMemcpy(h_rho.data(), d_rho, sizeof(double) * aoGrids.ngrids, cudaMemcpyDeviceToHost);
+        std::cout << "[DEBUG] First 10 values of rho:" << std::endl;
+        for (int i = 0; i < std::min(10, aoGrids.ngrids); ++i) {
+            std::cout << "  rho[" << i << "] = " << h_rho[i] << std::endl;
+        }
+
+        // 检查 weights 的前几个值
+        std::cout << "[DEBUG] First 10 values of weights:" << std::endl;
+        for (int i = 0; i < std::min(10, (int)weights.size()); ++i) {
+            std::cout << "  weights[" << i << "] = " << weights[i] << std::endl;
+        }
 
         // ---------------------------------------------------- [DFT] Vxc行列の更新 ---------------------------------------------------- //
         // lda.cuのbuild_vxc_matrix()と同じインターフェースにしています！
         // [第4引数] weights ... CPU上のstd::vector (weightsに該当)
-        gpu::build_vxc_matrix(num_basis_, aoGrids.ngrids, aoGrids.ao, weights, d_rho, d_V);
+
+        std::cout << "[DEBUG] Calling build_vxc_matrix with:" << std::endl;
+        std::cout << "[DEBUG]   nao (aoGrids.naos) = " << aoGrids.naos << std::endl;
+        std::cout << "[DEBUG]   ngrids = " << aoGrids.ngrids << std::endl;
+        std::cout << "[DEBUG]   weights.size() = " << weights.size() << std::endl;
+
+        // 重要: build_vxc_matrix の第1引数も aoGrids.naos であるべき！
+        gpu::build_vxc_matrix(aoGrids.naos, aoGrids.ngrids, d_ao, weights, d_rho, d_V);
+
+        std::cout << "[DEBUG] build_vxc_matrix completed" << std::endl;
+
+        // 检查 d_J 和 d_V 的前几个值
+        std::vector<double> h_J(num_basis_ * num_basis_);
+        std::vector<double> h_V(num_basis_ * num_basis_);
+        cudaMemcpy(h_J.data(), d_J, sizeof(double) * num_basis_ * num_basis_, cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_V.data(), d_V, sizeof(double) * num_basis_ * num_basis_, cudaMemcpyDeviceToHost);
+
+        std::cout << "[DEBUG] First few values of J matrix:" << std::endl;
+        for (int i = 0; i < std::min(10, num_basis_ * num_basis_); ++i) {
+            std::cout << "  J[" << i << "] = " << h_J[i] << std::endl;
+        }
+
+        std::cout << "[DEBUG] First few values of V (Vxc) matrix:" << std::endl;
+        for (int i = 0; i < std::min(10, num_basis_ * num_basis_); ++i) {
+            std::cout << "  V[" << i << "] = " << h_V[i] << std::endl;
+        }
 
         cudaFree(d_rho);
+        cudaFree(d_ao);
         // ---------------------------------------------------- [DFT] Vxc計算の部分 (ここまで) ----------------------------------------------------------------------------------------------------- //
-        /**/
 
 
 

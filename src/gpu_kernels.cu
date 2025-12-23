@@ -1479,6 +1479,15 @@ namespace gansu::gpu
                         p.b * p.x0 / denom * (2.0 / (x - p.x0) - (2.0 * x + p.b) / X));
     }
 
+    /* Initialize VWN parameters in constant memory */
+    void initialize_vwn_params() {
+        static bool initialized = false;
+        if (!initialized) {
+            cudaMemcpyToSymbol(vwn_param, vwn_param_host, 2 * sizeof(VWNPar));
+            initialized = true;
+        }
+    }
+
     __global__ void lda_exc_vxc_kernel(int ngrid,
                                        const double *rho,
                                        double *exc,

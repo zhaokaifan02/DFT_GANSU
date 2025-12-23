@@ -105,6 +105,7 @@ void computeKMatrix_DFT_RHF(const real_t* d_density_matrix, real_t* d_K_matrix, 
 /* ---------------------------------------------------- [DFT] ---------------------------------------------------- */
 void build(const Atom* h_atoms,const int nAtom, const PrimitiveShell *shells_ptr,int bsisnum,AOGrids& aoGrids, std::pair<std::vector<std::array<double, 3>>,std::vector<double>>& grids);
 void get_rho(const int num_basis, const int ngrids, const double* d_dm, const double* d_ao, double* d_rho);
+void initialize_vwn_params();  // Initialize VWN parameters in constant memory
 void build_vxc_matrix(const int num_basis, const int ngrids, const double* d_ao, std::vector<double>& weights_vector, double* d_rho, double* d_V);
 
 

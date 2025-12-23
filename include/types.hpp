@@ -254,7 +254,7 @@ namespace gansu
 
     struct AOGrids
     {
-        double *ao; // GPUメモリへのポインタ(AOEval::evaluate_aos_on_grids_gpu_raw)
+        double *ao; // cpuメモリへのポインタ(AOEval::evaluate_aos_on_grids_gpu_raw)
         int ngrids;
         int naos;
     };

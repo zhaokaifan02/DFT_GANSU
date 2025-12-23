@@ -465,6 +465,11 @@ namespace gansu::gpu
         const int num_kernels = shell_quadruples.size();
         std::vector<cudaStream_t> streams(num_kernels);
 
+        // 创建 CUDA streams
+        for (int i = 0; i < num_kernels; i++) {
+            cudaStreamCreate(&streams[i]);
+        }
+
         // for-loop for sorted shell-type (s0, s1, s2, s3)
         int stream_id = 0;
         for (const auto &quadruple : shell_quadruples)
@@ -2363,6 +2368,11 @@ namespace gansu::gpu
         const int num_kernels = shell_quadruples.size();
         std::vector<cudaStream_t> streams(num_kernels);
 
+        // 创建 CUDA streams
+        for (int i = 0; i < num_kernels; i++) {
+            cudaStreamCreate(&streams[i]);
+        }
+
         // for-loop for sorted shell-type (s0, s1, s2, s3)
         int stream_id = 0;
         for (const auto &quadruple : shell_quadruples)
@@ -2465,6 +2475,11 @@ namespace gansu::gpu
         // make multi stream
         const int num_kernels = shell_quadruples.size();
         std::vector<cudaStream_t> streams(num_kernels);
+
+        // 创建 CUDA streams
+        for (int i = 0; i < num_kernels; i++) {
+            cudaStreamCreate(&streams[i]);
+        }
 
         // for-loop for sorted shell-type (s0, s1, s2, s3)
         int stream_id = 0;
@@ -2642,6 +2657,9 @@ namespace gansu::gpu
 
     void build_vxc_matrix(const int nao, const int ngrids, const double *d_ao, std::vector<double> &weights_vector, double *d_rho, double *d_V)
     {
+        // Initialize VWN parameters in constant memory (if not already done)
+        initialize_vwn_params();
+
         if (weights_vector.size() != static_cast<size_t>(ngrids))
             throw std::invalid_argument("weights_vector.size() != ngrids");
 
