@@ -670,6 +670,20 @@ namespace gansu::dft::chemgrid
         double *out_ao_values, // [nao x ngrids]
         int ngrids,
         int nao);
+    void evaluate_ao_grad_on_grids_gpu_raw(
+        const std::vector<AODesc> &ao_list,
+        const std::vector<std::array<double, 3>> &atom_coords,
+        const std::vector<std::array<double, 3>> &grid_coords,
+        double *out_grad, // [3 x ngrids x nao]
+        int ngrids,
+        int nao);
+    void evaluate_aos_grad_gpu_shell_grouped(
+        const std::vector<AODesc> &ao_list,
+        const std::vector<std::array<double, 3>> &atom_coords,
+        const std::vector<std::array<double, 3>> &grid_coords,
+        double *out_grad, // [3 x ngrids x nao]
+        int ngrids,
+        int nao);
 }
 // output API
 struct AngularMomentumKey
@@ -698,16 +712,15 @@ struct ShellData
 {
     int atom_idx;
     int l;
-    double fac;                      // sqrt((2l+1)/(4π))
+    double fac; // sqrt((2l+1)/(4π))
     int nprim;
     std::vector<double> exps;
     std::vector<double> coeffs;
-    std::vector<int> ao_indices;     // Which AOs belong to this shell
-    std::vector<int> lx_list;        // lx for each AO
-    std::vector<int> ly_list;        // ly for each AO
-    std::vector<int> lz_list;        // lz for each AO
+    std::vector<int> ao_indices; // Which AOs belong to this shell
+    std::vector<int> lx_list;    // lx for each AO
+    std::vector<int> ly_list;    // ly for each AO
+    std::vector<int> lz_list;    // lz for each AO
 };
-
 
 namespace gansu::dft
 {

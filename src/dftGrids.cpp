@@ -1801,19 +1801,20 @@ namespace gansu::dft
         printf("values size: %d x %d \n", ngrids, nao);
         double *ao_values = new double[ngrids * nao];
         // printf("Evaluating AOs on grids using GPU...\n");
-        // chemgrid::evaluate_aos_on_grids_gpu_raw(AODESC, atm_coords, coords, ao_values, ngrids, nao);
-        chemgrid::evaluate_aos_gpu_shell_grouped(AODESC, atm_coords, coords, ao_values, ngrids, nao);
+        chemgrid::evaluate_aos_on_grids_gpu_raw(AODESC, atm_coords, coords, ao_values, ngrids, nao);
+        // chemgrid::evaluate_aos_gpu_shell_grouped(AODESC, atm_coords, coords, ao_values, ngrids, nao);
         double *out_grad = new double[3 * ngrids * nao];
         // printf("Evaluating AO gradients on grids using CPU...\n");
-        // evaluate_ao_grad(AODESC, atm_coords, coords, out_grad, ngrids, nao);
+        evaluate_ao_grad(AODESC, atm_coords, coords, out_grad, ngrids, nao);
+        // chemgrid::evaluate_aos_grad_gpu_shell_grouped(AODESC, atm_coords, coords, out_grad, ngrids, nao);
         // // EXPORT TO TXT FOR DEBUGGING
-        // export_ao_values_to_txt(ao_values, ngrids, nao, "ao_values.txt");
-        // export_ao_grad_to_txt(out_grad, ngrids, nao, "ao_gradients.txt");
+        export_ao_values_to_txt(ao_values, ngrids, nao, "ao_values.txt");
+        export_ao_grad_to_txt(out_grad, ngrids, nao, "ao_gradients.txt");
         AOGrids outAO;
         outAO.ao = ao_values;
         outAO.naos = nao;
         outAO.ngrids = ngrids;
-        
+
         return outAO;
     }
 

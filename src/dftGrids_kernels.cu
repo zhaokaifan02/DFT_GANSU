@@ -463,7 +463,7 @@ namespace gansu::dft::chemgrid
             (cudaMemcpy(d_coeffs, ao.coeffs.data(), nprim * sizeof(double),
                         cudaMemcpyHostToDevice));
             // Kernel start
-            cudaEventRecord(start, 0); // 
+            cudaEventRecord(start, 0); //
             gpu::evaluate_single_ao_kernel<<<grid_size, block_size>>>(
                 d_ao_values + ao_idx, // ao_idx offset
                 d_grid_coords,
@@ -474,12 +474,12 @@ namespace gansu::dft::chemgrid
                 ao.lx, ao.ly, ao.lz,
                 ngrids,
                 nao);
-            cudaEventRecord(stop, 0);  
-            cudaEventSynchronize(stop); 
+            cudaEventRecord(stop, 0);
+            cudaEventSynchronize(stop);
 
             float milliseconds = 0;
             cudaEventElapsedTime(&milliseconds, start, stop);
-            total_kernel_time_ms += milliseconds; // 
+            total_kernel_time_ms += milliseconds; //
                                                   // --------------------------------
             (cudaGetLastError());
             (cudaFree(d_atom_coord));
@@ -1210,4 +1210,846 @@ namespace gansu::dft::chemgrid
         cudaFree(d_atom_coords);
         cudaFree(d_ao_values);
     }
+    // fan 1223  aos grids evaluate
+    __device__ __forceinline__ double dev_pow_int(double x, int n)
+    {
+        if (n <= 0)
+            return (n == 0 ? 1.0 : 0.0); // n<0 -> 0 (不会被用到，因为前面有系数 l=0)
+        double r = 1.0;
+        for (int i = 0; i < n; ++i)
+            r *= x;
+        return r;
+    }
+
+    // out_grad layout: [3 x ngrids x nao]
+    __global__ void evaluate_single_ao_grad_kernel(
+        double *out_grad,          // [3*ngrids*nao]
+        const double *grid_coords, // [ngrids*3]
+        const double *atom_coord,  // [3]
+        const double *exps,        // [nprim]
+        const double *coeffs,      // [nprim]
+        int nprim,
+        int lx, int ly, int lz,
+        double fac, // e.g. get_fac(l)
+        int ngrids,
+        int nao,
+        int ao_idx) // which column to write
+    {
+        int g = blockIdx.x * blockDim.x + threadIdx.x;
+        if (g >= ngrids)
+            return;
+
+        const double gx = grid_coords[g * 3 + 0];
+        const double gy = grid_coords[g * 3 + 1];
+        const double gz = grid_coords[g * 3 + 2];
+
+        const double dx = gx - atom_coord[0];
+        const double dy = gy - atom_coord[1];
+        const double dz = gz - atom_coord[2];
+        const double r2 = dx * dx + dy * dy + dz * dz;
+
+        // contracted sums
+        double ce = 0.0;   // Σ c * exp(-α r^2)
+        double ce_a = 0.0; // Σ c * exp(-α r^2) * α
+        for (int p = 0; p < nprim; ++p)
+        {
+            const double alpha = exps[p];
+            const double coeff = coeffs[p];
+            const double e = exp(-alpha * r2);
+            ce += coeff * e;
+            ce_a += coeff * e * alpha;
+        }
+        ce *= fac;
+        const double ce_2a = (-2.0) * fac * ce_a; // Σ c * (-2α) * exp(-α r^2) * fac
+
+        // angular powers
+        const double dx_lx = dev_pow_int(dx, lx);
+        const double dy_ly = dev_pow_int(dy, ly);
+        const double dz_lz = dev_pow_int(dz, lz);
+        const double dx_lx_m1 = (lx > 0) ? dev_pow_int(dx, lx - 1) : 0.0;
+        const double dy_ly_m1 = (ly > 0) ? dev_pow_int(dy, ly - 1) : 0.0;
+        const double dz_lz_m1 = (lz > 0) ? dev_pow_int(dz, lz - 1) : 0.0;
+
+        const double common_yz = dy_ly * dz_lz;
+        const double common_xz = dx_lx * dz_lz;
+        const double common_xy = dx_lx * dy_ly;
+
+        // CPU 同式：grad_x = dy^ly dz^lz ( lx dx^(lx-1) ce + dx^lx dx ce_2a )
+        const double grad_x = common_yz * ((double)lx * dx_lx_m1 * ce + dx_lx * dx * ce_2a);
+        const double grad_y = common_xz * ((double)ly * dy_ly_m1 * ce + dy_ly * dy * ce_2a);
+        const double grad_z = common_xy * ((double)lz * dz_lz_m1 * ce + dz_lz * dz * ce_2a);
+
+        const int base = g * nao + ao_idx;
+        out_grad[0 * (ngrids * nao) + base] = grad_x;
+        out_grad[1 * (ngrids * nao) + base] = grad_y;
+        out_grad[2 * (ngrids * nao) + base] = grad_z;
+    }
+    void evaluate_ao_grad_on_grids_gpu_raw(
+        const std::vector<AODesc> &ao_list,
+        const std::vector<std::array<double, 3>> &atom_coords,
+        const std::vector<std::array<double, 3>> &grid_coords,
+        double *out_grad, // [3 x ngrids x nao]
+        int ngrids,
+        int nao)
+    {
+        if (nao != (int)ao_list.size())
+            throw std::invalid_argument("nao != ao_list.size()");
+        if (ngrids != (int)grid_coords.size())
+            throw std::invalid_argument("ngrids != grid_coords.size()");
+
+        std::cout << "Evaluating AO grads: nao=" << nao << ", ngrids=" << ngrids << "\n";
+
+        const size_t total_size = (size_t)3 * (size_t)ngrids * (size_t)nao * sizeof(double);
+        std::cout << "Total grad memory requirement: " << total_size / (1024.0 * 1024.0) << " MB\n";
+
+        // device out
+        double *d_grad = nullptr;
+        cudaMalloc(&d_grad, total_size);
+        cudaMemset(d_grad, 0, total_size);
+
+        // flatten grids
+        std::vector<double> h_flat_grids((size_t)ngrids * 3);
+        for (int i = 0; i < ngrids; ++i)
+        {
+            h_flat_grids[i * 3 + 0] = grid_coords[i][0];
+            h_flat_grids[i * 3 + 1] = grid_coords[i][1];
+            h_flat_grids[i * 3 + 2] = grid_coords[i][2];
+        }
+
+        double *d_grid_coords = nullptr;
+        cudaMalloc(&d_grid_coords, (size_t)ngrids * 3 * sizeof(double));
+        cudaMemcpy(d_grid_coords, h_flat_grids.data(),
+                   (size_t)ngrids * 3 * sizeof(double), cudaMemcpyHostToDevice);
+
+        const int block_size = 256;
+        const int grid_size = (ngrids + block_size - 1) / block_size;
+
+        cudaEvent_t start, stop;
+        cudaEventCreate(&start);
+        cudaEventCreate(&stop);
+        float total_kernel_time_ms = 0.0f;
+
+        for (int ao_idx = 0; ao_idx < nao; ++ao_idx)
+        {
+            const AODesc &ao = ao_list[ao_idx];
+            const int nprim = (int)ao.exps.size();
+
+            // atom coord (device)
+            double atom_coord_h[3] = {
+                atom_coords[ao.atom][0],
+                atom_coords[ao.atom][1],
+                atom_coords[ao.atom][2]};
+            double *d_atom_coord = nullptr;
+            cudaMalloc(&d_atom_coord, 3 * sizeof(double));
+            cudaMemcpy(d_atom_coord, atom_coord_h, 3 * sizeof(double), cudaMemcpyHostToDevice);
+
+            // exps/coeffs (device)
+            double *d_exps = nullptr, *d_coeffs = nullptr;
+            cudaMalloc(&d_exps, (size_t)nprim * sizeof(double));
+            cudaMalloc(&d_coeffs, (size_t)nprim * sizeof(double));
+            cudaMemcpy(d_exps, ao.exps.data(), (size_t)nprim * sizeof(double), cudaMemcpyHostToDevice);
+            cudaMemcpy(d_coeffs, ao.coeffs.data(), (size_t)nprim * sizeof(double), cudaMemcpyHostToDevice);
+
+            // fac: 用你已有的 get_fac(l)（host 上算好，传进 kernel）
+            const double fac = get_fac(ao.l);
+
+            cudaEventRecord(start, 0);
+            evaluate_single_ao_grad_kernel<<<grid_size, block_size>>>(
+                d_grad,
+                d_grid_coords,
+                d_atom_coord,
+                d_exps,
+                d_coeffs,
+                nprim,
+                ao.lx, ao.ly, ao.lz,
+                fac,
+                ngrids,
+                nao,
+                ao_idx);
+            cudaEventRecord(stop, 0);
+            cudaEventSynchronize(stop);
+
+            float ms = 0.0f;
+            cudaEventElapsedTime(&ms, start, stop);
+            total_kernel_time_ms += ms;
+
+            cudaGetLastError();
+
+            cudaFree(d_atom_coord);
+            cudaFree(d_exps);
+            cudaFree(d_coeffs);
+
+            if ((ao_idx + 1) % 10 == 0 || ao_idx == nao - 1)
+                std::cout << "  Completed " << (ao_idx + 1) << "/" << nao << " AOs\n";
+        }
+
+        std::cout << "========================================\n";
+        std::cout << "RAW Total PURE Kernel Execution Time: " << total_kernel_time_ms << " ms\n";
+        std::cout << "========================================\n";
+
+        cudaEventDestroy(start);
+        cudaEventDestroy(stop);
+
+        cudaMemcpy(out_grad, d_grad, total_size, cudaMemcpyDeviceToHost);
+
+        cudaFree(d_grid_coords);
+        cudaFree(d_grad);
+
+        std::cout << "GPU AO grad evaluation completed!\n";
+    }
+
+    // fan 12 23 grouped ao grid
+    //  ============================================================
+    //  Kernel for s orbitals (l=0)
+    //  Output layout: [3*ngrids x nao]
+    //  ============================================================
+    __global__ void evaluate_s_shells_grad_kernel(
+        double *__restrict__ ao_grad, // [3 x ngrids x nao]
+        const double *__restrict__ grid_coords,
+        const double *__restrict__ atom_coords,
+        const int *__restrict__ shell_ao_indices, // size=num_shells, each is the AO index
+        const int *__restrict__ shell_atom_indices,
+        const int *__restrict__ shell_prim_offsets,
+        const int *__restrict__ shell_prim_counts,
+        const double *__restrict__ all_exps,
+        const double *__restrict__ all_coeffs,
+        double fac,
+        int num_shells,
+        int ngrids,
+        int nao)
+    {
+        int g = blockIdx.x * blockDim.x + threadIdx.x;
+        if (g >= ngrids)
+            return;
+
+        const double gx = grid_coords[g * 3 + 0];
+        const double gy = grid_coords[g * 3 + 1];
+        const double gz = grid_coords[g * 3 + 2];
+
+        for (int s = 0; s < num_shells; ++s)
+        {
+            const int ao_idx = shell_ao_indices[s];
+            const int atom = shell_atom_indices[s];
+            const int p0 = shell_prim_offsets[s];
+            const int nprim = shell_prim_counts[s];
+
+            const double ax = atom_coords[atom * 3 + 0];
+            const double ay = atom_coords[atom * 3 + 1];
+            const double az = atom_coords[atom * 3 + 2];
+
+            const double dx = gx - ax;
+            const double dy = gy - ay;
+            const double dz = gz - az;
+            const double r2 = dx * dx + dy * dy + dz * dz;
+
+            double ce_a = 0.0; // Σ c*e*alpha
+            for (int p = 0; p < nprim; ++p)
+            {
+                const double alpha = all_exps[p0 + p];
+                const double coeff = all_coeffs[p0 + p];
+                const double e = exp(-alpha * r2);
+                ce_a += coeff * e * alpha;
+            }
+            const double ce_2a = (-2.0) * fac * ce_a;
+
+            const int base = g * nao + ao_idx;
+            ao_grad[0 * (ngrids * nao) + base] = ce_2a * dx;
+            ao_grad[1 * (ngrids * nao) + base] = ce_2a * dy;
+            ao_grad[2 * (ngrids * nao) + base] = ce_2a * dz;
+        }
+    }
+    __global__ void evaluate_p_shells_grad_kernel(
+        double *__restrict__ ao_grad,
+        const double *__restrict__ grid_coords,
+        const double *__restrict__ atom_coords,
+        const int *__restrict__ shell_ao_start, // px index
+        const int *__restrict__ shell_atom_indices,
+        const int *__restrict__ shell_prim_offsets,
+        const int *__restrict__ shell_prim_counts,
+        const double *__restrict__ all_exps,
+        const double *__restrict__ all_coeffs,
+        double fac,
+        int num_shells,
+        int ngrids,
+        int nao)
+    {
+        int g = blockIdx.x * blockDim.x + threadIdx.x;
+        if (g >= ngrids)
+            return;
+
+        const double gx = grid_coords[g * 3 + 0];
+        const double gy = grid_coords[g * 3 + 1];
+        const double gz = grid_coords[g * 3 + 2];
+
+        for (int s = 0; s < num_shells; ++s)
+        {
+            const int ao0 = shell_ao_start[s];
+            const int atom = shell_atom_indices[s];
+            const int p0 = shell_prim_offsets[s];
+            const int nprim = shell_prim_counts[s];
+
+            const double ax = atom_coords[atom * 3 + 0];
+            const double ay = atom_coords[atom * 3 + 1];
+            const double az = atom_coords[atom * 3 + 2];
+
+            const double dx = gx - ax;
+            const double dy = gy - ay;
+            const double dz = gz - az;
+            const double r2 = dx * dx + dy * dy + dz * dz;
+
+            double ce = 0.0;
+            double ce_a = 0.0;
+            for (int p = 0; p < nprim; ++p)
+            {
+                const double alpha = all_exps[p0 + p];
+                const double coeff = all_coeffs[p0 + p];
+                const double e = exp(-alpha * r2);
+                ce += coeff * e;
+                ce_a += coeff * e * alpha;
+            }
+            ce *= fac;
+            const double ce_2a = (-2.0) * fac * ce_a;
+
+            const int bpx = g * nao + (ao0 + 0);
+            const int bpy = g * nao + (ao0 + 1);
+            const int bpz = g * nao + (ao0 + 2);
+
+            // px = ce*dx
+            ao_grad[0 * (ngrids * nao) + bpx] = ce + ce_2a * dx * dx;
+            ao_grad[1 * (ngrids * nao) + bpx] = ce_2a * dy * dx;
+            ao_grad[2 * (ngrids * nao) + bpx] = ce_2a * dz * dx;
+
+            // py = ce*dy
+            ao_grad[0 * (ngrids * nao) + bpy] = ce_2a * dx * dy;
+            ao_grad[1 * (ngrids * nao) + bpy] = ce + ce_2a * dy * dy;
+            ao_grad[2 * (ngrids * nao) + bpy] = ce_2a * dz * dy;
+
+            // pz = ce*dz
+            ao_grad[0 * (ngrids * nao) + bpz] = ce_2a * dx * dz;
+            ao_grad[1 * (ngrids * nao) + bpz] = ce_2a * dy * dz;
+            ao_grad[2 * (ngrids * nao) + bpz] = ce + ce_2a * dz * dz;
+        }
+    }
+
+    // d
+    __global__ void evaluate_d_shells_grad_kernel(
+        double *__restrict__ ao_grad, // [3 x ngrids x nao]
+        const double *__restrict__ grid_coords,
+        const double *__restrict__ atom_coords,
+        const int *__restrict__ shell_ao_start, // base AO index for this d shell
+        const int *__restrict__ shell_atom_indices,
+        const int *__restrict__ shell_prim_offsets,
+        const int *__restrict__ shell_prim_counts,
+        const double *__restrict__ all_exps,
+        const double *__restrict__ all_coeffs,
+        double fac,
+        int num_shells,
+        int ngrids,
+        int nao)
+    {
+        int g = blockIdx.x * blockDim.x + threadIdx.x;
+        if (g >= ngrids)
+            return;
+
+        const double gx = grid_coords[g * 3 + 0];
+        const double gy = grid_coords[g * 3 + 1];
+        const double gz = grid_coords[g * 3 + 2];
+
+        for (int s = 0; s < num_shells; ++s)
+        {
+            const int ao0 = shell_ao_start[s];
+            const int atom = shell_atom_indices[s];
+            const int p0 = shell_prim_offsets[s];
+            const int nprim = shell_prim_counts[s];
+
+            const double ax = atom_coords[atom * 3 + 0];
+            const double ay = atom_coords[atom * 3 + 1];
+            const double az = atom_coords[atom * 3 + 2];
+
+            const double dx = gx - ax;
+            const double dy = gy - ay;
+            const double dz = gz - az;
+            const double r2 = dx * dx + dy * dy + dz * dz;
+
+            double ce = 0.0;   // fac * Σ c e
+            double ce_a = 0.0; // fac * Σ c e α  (later multiply -2)
+            for (int p = 0; p < nprim; ++p)
+            {
+                const double alpha = all_exps[p0 + p];
+                const double coeff = all_coeffs[p0 + p];
+                const double e = exp(-alpha * r2);
+                ce += coeff * e;
+                ce_a += coeff * e * alpha;
+            }
+            ce *= fac;
+            const double ce_2a = (-2.0) * fac * ce_a;
+
+            const double dx2 = dx * dx;
+            const double dy2 = dy * dy;
+            const double dz2 = dz * dz;
+
+            // monomials
+            const double M_xx = dx2;
+            const double M_xy = dx * dy;
+            const double M_xz = dx * dz;
+            const double M_yy = dy2;
+            const double M_yz = dy * dz;
+            const double M_zz = dz2;
+
+            // d/dx ce = ce_2a * dx (same for y,z)
+            const double dce_dx = ce_2a * dx;
+            const double dce_dy = ce_2a * dy;
+            const double dce_dz = ce_2a * dz;
+
+            // ∂xM, ∂yM, ∂zM
+            // xx
+            const double dMxx_dx = 2.0 * dx, dMxx_dy = 0.0, dMxx_dz = 0.0;
+            // xy
+            const double dMxy_dx = dy, dMxy_dy = dx, dMxy_dz = 0.0;
+            // xz
+            const double dMxz_dx = dz, dMxz_dy = 0.0, dMxz_dz = dx;
+            // yy
+            const double dMyy_dx = 0.0, dMyy_dy = 2.0 * dy, dMyy_dz = 0.0;
+            // yz
+            const double dMyz_dx = 0.0, dMyz_dy = dz, dMyz_dz = dy;
+            // zz
+            const double dMzz_dx = 0.0, dMzz_dy = 0.0, dMzz_dz = 2.0 * dz;
+
+            // write helper lambda-like macro
+            auto write3 = [&](int ao, double dM_dx, double dM_dy, double dM_dz, double M)
+            {
+                const int base = g * nao + ao;
+                ao_grad[0 * (ngrids * nao) + base] = ce * dM_dx + dce_dx * M;
+                ao_grad[1 * (ngrids * nao) + base] = ce * dM_dy + dce_dy * M;
+                ao_grad[2 * (ngrids * nao) + base] = ce * dM_dz + dce_dz * M;
+            };
+
+            // order: xx, xy, xz, yy, yz, zz
+            write3(ao0 + 0, dMxx_dx, dMxx_dy, dMxx_dz, M_xx);
+            write3(ao0 + 1, dMxy_dx, dMxy_dy, dMxy_dz, M_xy);
+            write3(ao0 + 2, dMxz_dx, dMxz_dy, dMxz_dz, M_xz);
+            write3(ao0 + 3, dMyy_dx, dMyy_dy, dMyy_dz, M_yy);
+            write3(ao0 + 4, dMyz_dx, dMyz_dy, dMyz_dz, M_yz);
+            write3(ao0 + 5, dMzz_dx, dMzz_dy, dMzz_dz, M_zz);
+        }
+    }
+    // f
+    __global__ void evaluate_f_shells_grad_kernel(
+        double *__restrict__ ao_grad, // [3 x ngrids x nao]
+        const double *__restrict__ grid_coords,
+        const double *__restrict__ atom_coords,
+        const int *__restrict__ shell_ao_start, // base AO index for this f shell
+        const int *__restrict__ shell_atom_indices,
+        const int *__restrict__ shell_prim_offsets,
+        const int *__restrict__ shell_prim_counts,
+        const double *__restrict__ all_exps,
+        const double *__restrict__ all_coeffs,
+        double fac,
+        int num_shells,
+        int ngrids,
+        int nao)
+    {
+        int g = blockIdx.x * blockDim.x + threadIdx.x;
+        if (g >= ngrids)
+            return;
+
+        const double gx = grid_coords[g * 3 + 0];
+        const double gy = grid_coords[g * 3 + 1];
+        const double gz = grid_coords[g * 3 + 2];
+
+        for (int s = 0; s < num_shells; ++s)
+        {
+            const int ao0 = shell_ao_start[s];
+            const int atom = shell_atom_indices[s];
+            const int p0 = shell_prim_offsets[s];
+            const int nprim = shell_prim_counts[s];
+
+            const double ax = atom_coords[atom * 3 + 0];
+            const double ay = atom_coords[atom * 3 + 1];
+            const double az = atom_coords[atom * 3 + 2];
+
+            const double dx = gx - ax;
+            const double dy = gy - ay;
+            const double dz = gz - az;
+            const double r2 = dx * dx + dy * dy + dz * dz;
+
+            double ce = 0.0;
+            double ce_a = 0.0;
+            for (int p = 0; p < nprim; ++p)
+            {
+                const double alpha = all_exps[p0 + p];
+                const double coeff = all_coeffs[p0 + p];
+                const double e = exp(-alpha * r2);
+                ce += coeff * e;
+                ce_a += coeff * e * alpha;
+            }
+            ce *= fac;
+            const double ce_2a = (-2.0) * fac * ce_a;
+
+            const double dx2 = dx * dx, dy2 = dy * dy, dz2 = dz * dz;
+            const double dx3 = dx2 * dx, dy3 = dy2 * dy, dz3 = dz2 * dz;
+
+            const double dce_dx = ce_2a * dx;
+            const double dce_dy = ce_2a * dy;
+            const double dce_dz = ce_2a * dz;
+
+            // monomials (order as your value kernel)
+            const double M_xxx = dx3;
+            const double M_xxy = dx2 * dy;
+            const double M_xxz = dx2 * dz;
+            const double M_xyy = dx * dy2;
+            const double M_xyz = dx * dy * dz;
+            const double M_xzz = dx * dz2;
+            const double M_yyy = dy3;
+            const double M_yyz = dy2 * dz;
+            const double M_yzz = dy * dz2;
+            const double M_zzz = dz3;
+
+            // derivatives of monomials
+            // xxx
+            const double dMxxx_dx = 3.0 * dx2, dMxxx_dy = 0.0, dMxxx_dz = 0.0;
+            // xxy
+            const double dMxxy_dx = 2.0 * dx * dy, dMxxy_dy = dx2, dMxxy_dz = 0.0;
+            // xxz
+            const double dMxxz_dx = 2.0 * dx * dz, dMxxz_dy = 0.0, dMxxz_dz = dx2;
+            // xyy
+            const double dMxyy_dx = dy2, dMxyy_dy = 2.0 * dx * dy, dMxyy_dz = 0.0;
+            // xyz
+            const double dMxyz_dx = dy * dz, dMxyz_dy = dx * dz, dMxyz_dz = dx * dy;
+            // xzz
+            const double dMxzz_dx = dz2, dMxzz_dy = 0.0, dMxzz_dz = 2.0 * dx * dz;
+            // yyy
+            const double dMyyy_dx = 0.0, dMyyy_dy = 3.0 * dy2, dMyyy_dz = 0.0;
+            // yyz
+            const double dMyyz_dx = 0.0, dMyyz_dy = 2.0 * dy * dz, dMyyz_dz = dy2;
+            // yzz
+            const double dMyzz_dx = 0.0, dMyzz_dy = dz2, dMyzz_dz = 2.0 * dy * dz;
+            // zzz
+            const double dMzzz_dx = 0.0, dMzzz_dy = 0.0, dMzzz_dz = 3.0 * dz2;
+
+            auto write3 = [&](int ao, double dM_dx, double dM_dy, double dM_dz, double M)
+            {
+                const int base = g * nao + ao;
+                ao_grad[0 * (ngrids * nao) + base] = ce * dM_dx + dce_dx * M;
+                ao_grad[1 * (ngrids * nao) + base] = ce * dM_dy + dce_dy * M;
+                ao_grad[2 * (ngrids * nao) + base] = ce * dM_dz + dce_dz * M;
+            };
+
+            write3(ao0 + 0, dMxxx_dx, dMxxx_dy, dMxxx_dz, M_xxx);
+            write3(ao0 + 1, dMxxy_dx, dMxxy_dy, dMxxy_dz, M_xxy);
+            write3(ao0 + 2, dMxxz_dx, dMxxz_dy, dMxxz_dz, M_xxz);
+            write3(ao0 + 3, dMxyy_dx, dMxyy_dy, dMxyy_dz, M_xyy);
+            write3(ao0 + 4, dMxyz_dx, dMxyz_dy, dMxyz_dz, M_xyz);
+            write3(ao0 + 5, dMxzz_dx, dMxzz_dy, dMxzz_dz, M_xzz);
+            write3(ao0 + 6, dMyyy_dx, dMyyy_dy, dMyyy_dz, M_yyy);
+            write3(ao0 + 7, dMyyz_dx, dMyyz_dy, dMyyz_dz, M_yyz);
+            write3(ao0 + 8, dMyzz_dx, dMyzz_dy, dMyzz_dz, M_yzz);
+            write3(ao0 + 9, dMzzz_dx, dMzzz_dy, dMzzz_dz, M_zzz);
+        }
+    }
+
+    // gener
+
+    __global__ void evaluate_general_shells_grad_kernel(
+        double *__restrict__ ao_grad, // [3 x ngrids x nao]
+        const double *__restrict__ grid_coords,
+        const double *__restrict__ atom_coords,
+        const int *__restrict__ shell_ao_start,
+        const int *__restrict__ shell_atom_indices,
+        const int *__restrict__ shell_prim_offsets,
+        const int *__restrict__ shell_prim_counts,
+        const int *__restrict__ shell_ncomponents,
+        const int *__restrict__ all_lx,
+        const int *__restrict__ all_ly,
+        const int *__restrict__ all_lz,
+        const int *__restrict__ ao_component_offsets,
+        const double *__restrict__ all_exps,
+        const double *__restrict__ all_coeffs,
+        double fac,
+        int num_shells,
+        int ngrids,
+        int nao)
+    {
+        int g = blockIdx.x * blockDim.x + threadIdx.x;
+        if (g >= ngrids)
+            return;
+
+        const double gx = grid_coords[g * 3 + 0];
+        const double gy = grid_coords[g * 3 + 1];
+        const double gz = grid_coords[g * 3 + 2];
+
+        for (int s = 0; s < num_shells; ++s)
+        {
+            const int ao0 = shell_ao_start[s];
+            const int atom = shell_atom_indices[s];
+            const int p0 = shell_prim_offsets[s];
+            const int nprim = shell_prim_counts[s];
+            const int ncomp = shell_ncomponents[s];
+            const int coff = ao_component_offsets[s];
+
+            const double ax = atom_coords[atom * 3 + 0];
+            const double ay = atom_coords[atom * 3 + 1];
+            const double az = atom_coords[atom * 3 + 2];
+
+            const double dx = gx - ax;
+            const double dy = gy - ay;
+            const double dz = gz - az;
+            const double r2 = dx * dx + dy * dy + dz * dz;
+
+            double ce = 0.0;
+            double ce_a = 0.0;
+            for (int p = 0; p < nprim; ++p)
+            {
+                const double alpha = all_exps[p0 + p];
+                const double coeff = all_coeffs[p0 + p];
+                const double e = exp(-alpha * r2);
+                ce += coeff * e;
+                ce_a += coeff * e * alpha;
+            }
+            ce *= fac;
+            const double ce_2a = (-2.0) * fac * ce_a;
+
+            for (int c = 0; c < ncomp; ++c)
+            {
+                const int lx = all_lx[coff + c];
+                const int ly = all_ly[coff + c];
+                const int lz = all_lz[coff + c];
+
+                const double dx_lx = dev_power(dx, lx);
+                const double dy_ly = dev_power(dy, ly);
+                const double dz_lz = dev_power(dz, lz);
+                const double dx_lx_m1 = (lx > 0) ? dev_power(dx, lx - 1) : 0.0;
+                const double dy_ly_m1 = (ly > 0) ? dev_power(dy, ly - 1) : 0.0;
+                const double dz_lz_m1 = (lz > 0) ? dev_power(dz, lz - 1) : 0.0;
+
+                const double common_yz = dy_ly * dz_lz;
+                const double common_xz = dx_lx * dz_lz;
+                const double common_xy = dx_lx * dy_ly;
+
+                const double gxv = common_yz * ((double)lx * dx_lx_m1 * ce + dx_lx * dx * ce_2a);
+                const double gyv = common_xz * ((double)ly * dy_ly_m1 * ce + dy_ly * dy * ce_2a);
+                const double gzv = common_xy * ((double)lz * dz_lz_m1 * ce + dz_lz * dz * ce_2a);
+
+                const int base = g * nao + (ao0 + c);
+                ao_grad[0 * (ngrids * nao) + base] = gxv;
+                ao_grad[1 * (ngrids * nao) + base] = gyv;
+                ao_grad[2 * (ngrids * nao) + base] = gzv;
+            }
+        }
+    }
+
+    // host kernel
+    void evaluate_aos_grad_gpu_shell_grouped(
+        const std::vector<AODesc> &ao_list,
+        const std::vector<std::array<double, 3>> &atom_coords,
+        const std::vector<std::array<double, 3>> &grid_coords,
+        double *out_grad, // [3 x ngrids x nao]
+        int ngrids,
+        int nao)
+    {
+        auto shell_groups = group_aos_by_shell(ao_list);
+
+        // device out
+        const size_t total_size = (size_t)3 * (size_t)ngrids * (size_t)nao * sizeof(double);
+        double *d_ao_grad = nullptr;
+        cudaMalloc(&d_ao_grad, total_size);
+        cudaMemset(d_ao_grad, 0, total_size);
+
+        // grid coords [ngrids x 3]
+        std::vector<double> h_flat_grids((size_t)ngrids * 3);
+        for (int i = 0; i < ngrids; ++i)
+        {
+            h_flat_grids[i * 3 + 0] = grid_coords[i][0];
+            h_flat_grids[i * 3 + 1] = grid_coords[i][1];
+            h_flat_grids[i * 3 + 2] = grid_coords[i][2];
+        }
+        double *d_grid_coords = nullptr;
+        cudaMalloc(&d_grid_coords, (size_t)ngrids * 3 * sizeof(double));
+        cudaMemcpy(d_grid_coords, h_flat_grids.data(),
+                   (size_t)ngrids * 3 * sizeof(double), cudaMemcpyHostToDevice);
+
+        // atom coords [natoms x 3]
+        const int natoms = (int)atom_coords.size();
+        std::vector<double> h_atom_coords((size_t)natoms * 3);
+        for (int i = 0; i < natoms; ++i)
+        {
+            h_atom_coords[i * 3 + 0] = atom_coords[i][0];
+            h_atom_coords[i * 3 + 1] = atom_coords[i][1];
+            h_atom_coords[i * 3 + 2] = atom_coords[i][2];
+        }
+        double *d_atom_coords = nullptr;
+        cudaMalloc(&d_atom_coords, (size_t)natoms * 3 * sizeof(double));
+        cudaMemcpy(d_atom_coords, h_atom_coords.data(),
+                   (size_t)natoms * 3 * sizeof(double), cudaMemcpyHostToDevice);
+
+        const int block_size = 256;
+        const int grid_size = (ngrids + block_size - 1) / block_size;
+
+        cudaEvent_t start, stop;
+        cudaEventCreate(&start);
+        cudaEventCreate(&stop);
+        float total_kernel_time_ms = 0.0f;
+
+        for (const auto &[l, shells] : shell_groups)
+        {
+            const int num_shells = (int)shells.size();
+            const double fac = get_fac(l);
+
+            // per-shell arrays
+            std::vector<int> h_ao_start, h_atom_indices, h_prim_offsets, h_prim_counts;
+            std::vector<double> h_all_exps, h_all_coeffs;
+
+            h_ao_start.reserve(num_shells);
+            h_atom_indices.reserve(num_shells);
+            h_prim_offsets.reserve(num_shells);
+            h_prim_counts.reserve(num_shells);
+
+            int prim_offset = 0;
+            for (const auto &shell : shells)
+            {
+                // s: 单 AO index；p/d/...: 起始 index
+                h_ao_start.push_back(shell.ao_indices[0]);
+                h_atom_indices.push_back(shell.atom_idx);
+                h_prim_offsets.push_back(prim_offset);
+                h_prim_counts.push_back(shell.nprim);
+
+                for (double e : shell.exps)
+                    h_all_exps.push_back(e);
+                for (double c : shell.coeffs)
+                    h_all_coeffs.push_back(c);
+                prim_offset += shell.nprim;
+            }
+
+            int *d_ao_start = nullptr, *d_atom_indices = nullptr, *d_prim_offsets = nullptr, *d_prim_counts = nullptr;
+            double *d_all_exps = nullptr, *d_all_coeffs = nullptr;
+
+            cudaMalloc(&d_ao_start, (size_t)num_shells * sizeof(int));
+            cudaMalloc(&d_atom_indices, (size_t)num_shells * sizeof(int));
+            cudaMalloc(&d_prim_offsets, (size_t)num_shells * sizeof(int));
+            cudaMalloc(&d_prim_counts, (size_t)num_shells * sizeof(int));
+            cudaMalloc(&d_all_exps, (size_t)h_all_exps.size() * sizeof(double));
+            cudaMalloc(&d_all_coeffs, (size_t)h_all_coeffs.size() * sizeof(double));
+
+            cudaMemcpy(d_ao_start, h_ao_start.data(), (size_t)num_shells * sizeof(int), cudaMemcpyHostToDevice);
+            cudaMemcpy(d_atom_indices, h_atom_indices.data(), (size_t)num_shells * sizeof(int), cudaMemcpyHostToDevice);
+            cudaMemcpy(d_prim_offsets, h_prim_offsets.data(), (size_t)num_shells * sizeof(int), cudaMemcpyHostToDevice);
+            cudaMemcpy(d_prim_counts, h_prim_counts.data(), (size_t)num_shells * sizeof(int), cudaMemcpyHostToDevice);
+            cudaMemcpy(d_all_exps, h_all_exps.data(), (size_t)h_all_exps.size() * sizeof(double), cudaMemcpyHostToDevice);
+            cudaMemcpy(d_all_coeffs, h_all_coeffs.data(), (size_t)h_all_coeffs.size() * sizeof(double), cudaMemcpyHostToDevice);
+
+            cudaEventRecord(start, 0);
+
+            if (l == 0)
+            {
+                // 注意：s kernel 参数名字叫 shell_ao_indices（单 index）
+                gansu::dft::chemgrid::evaluate_s_shells_grad_kernel<<<grid_size, block_size>>>(
+                    d_ao_grad, d_grid_coords, d_atom_coords,
+                    d_ao_start, d_atom_indices, d_prim_offsets, d_prim_counts,
+                    d_all_exps, d_all_coeffs,
+                    fac, num_shells, ngrids, nao);
+            }
+            else if (l == 1)
+            {
+                gansu::dft::chemgrid::evaluate_p_shells_grad_kernel<<<grid_size, block_size>>>(
+                    d_ao_grad, d_grid_coords, d_atom_coords,
+                    d_ao_start, d_atom_indices, d_prim_offsets, d_prim_counts,
+                    d_all_exps, d_all_coeffs,
+                    fac, num_shells, ngrids, nao);
+            }
+            else if (l == 2)
+            {
+                evaluate_d_shells_grad_kernel<<<grid_size, block_size>>>(
+                    d_ao_grad, d_grid_coords, d_atom_coords,
+                    d_ao_start, d_atom_indices, d_prim_offsets, d_prim_counts,
+                    d_all_exps, d_all_coeffs,
+                    fac, num_shells, ngrids, nao);
+            }
+            else if (l == 3)
+            {
+                evaluate_f_shells_grad_kernel<<<grid_size, block_size>>>(
+                    d_ao_grad, d_grid_coords, d_atom_coords,
+                    d_ao_start, d_atom_indices, d_prim_offsets, d_prim_counts,
+                    d_all_exps, d_all_coeffs,
+                    fac, num_shells, ngrids, nao);
+            }
+
+            else
+            {
+                // 统一走 general：需要组件表
+                std::vector<int> h_ncomponents, h_comp_offsets;
+                std::vector<int> h_all_lx, h_all_ly, h_all_lz;
+
+                h_ncomponents.reserve(num_shells);
+                h_comp_offsets.reserve(num_shells);
+
+                int comp_offset = 0;
+                for (const auto &shell : shells)
+                {
+                    const int ncomp = (int)shell.ao_indices.size();
+                    h_ncomponents.push_back(ncomp);
+                    h_comp_offsets.push_back(comp_offset);
+                    for (int c = 0; c < ncomp; ++c)
+                    {
+                        h_all_lx.push_back(shell.lx_list[c]);
+                        h_all_ly.push_back(shell.ly_list[c]);
+                        h_all_lz.push_back(shell.lz_list[c]);
+                    }
+                    comp_offset += ncomp;
+                }
+
+                int *d_ncomponents = nullptr, *d_comp_offsets = nullptr, *d_all_lx = nullptr, *d_all_ly = nullptr, *d_all_lz = nullptr;
+                cudaMalloc(&d_ncomponents, (size_t)num_shells * sizeof(int));
+                cudaMalloc(&d_comp_offsets, (size_t)num_shells * sizeof(int));
+                cudaMalloc(&d_all_lx, (size_t)h_all_lx.size() * sizeof(int));
+                cudaMalloc(&d_all_ly, (size_t)h_all_ly.size() * sizeof(int));
+                cudaMalloc(&d_all_lz, (size_t)h_all_lz.size() * sizeof(int));
+
+                cudaMemcpy(d_ncomponents, h_ncomponents.data(), (size_t)num_shells * sizeof(int), cudaMemcpyHostToDevice);
+                cudaMemcpy(d_comp_offsets, h_comp_offsets.data(), (size_t)num_shells * sizeof(int), cudaMemcpyHostToDevice);
+                cudaMemcpy(d_all_lx, h_all_lx.data(), (size_t)h_all_lx.size() * sizeof(int), cudaMemcpyHostToDevice);
+                cudaMemcpy(d_all_ly, h_all_ly.data(), (size_t)h_all_ly.size() * sizeof(int), cudaMemcpyHostToDevice);
+                cudaMemcpy(d_all_lz, h_all_lz.data(), (size_t)h_all_lz.size() * sizeof(int), cudaMemcpyHostToDevice);
+
+                gansu::dft::chemgrid::evaluate_general_shells_grad_kernel<<<grid_size, block_size>>>(
+                    d_ao_grad, d_grid_coords, d_atom_coords,
+                    d_ao_start, d_atom_indices, d_prim_offsets, d_prim_counts,
+                    d_ncomponents, d_all_lx, d_all_ly, d_all_lz, d_comp_offsets,
+                    d_all_exps, d_all_coeffs,
+                    fac, num_shells, ngrids, nao);
+
+                cudaFree(d_ncomponents);
+                cudaFree(d_comp_offsets);
+                cudaFree(d_all_lx);
+                cudaFree(d_all_ly);
+                cudaFree(d_all_lz);
+            }
+
+            cudaEventRecord(stop, 0);
+            cudaEventSynchronize(stop);
+            float ms = 0.0f;
+            cudaEventElapsedTime(&ms, start, stop);
+            total_kernel_time_ms += ms;
+
+            cudaGetLastError();
+
+            cudaFree(d_ao_start);
+            cudaFree(d_atom_indices);
+            cudaFree(d_prim_offsets);
+            cudaFree(d_prim_counts);
+            cudaFree(d_all_exps);
+            cudaFree(d_all_coeffs);
+        }
+
+        cudaDeviceSynchronize();
+        std::cout << "Total Pure Kernel Execution Time (grad): " << total_kernel_time_ms << " ms\n";
+        cudaEventDestroy(start);
+        cudaEventDestroy(stop);
+
+        cudaMemcpy(out_grad, d_ao_grad, total_size, cudaMemcpyDeviceToHost);
+
+        cudaFree(d_grid_coords);
+        cudaFree(d_atom_coords);
+        cudaFree(d_ao_grad);
+    }
+
 }

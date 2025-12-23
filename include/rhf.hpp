@@ -765,10 +765,10 @@ public:
         // メンバ変数aoGrids(ngrid, ao_cの情報)およびgrids(w_cの情報)を用いて計算してください！
 
         // デバッグ: aoGrids の初期化状態をチェック
-        std::cout << "[DEBUG] aoGrids.ngrids = " << aoGrids.ngrids << std::endl;
-        std::cout << "[DEBUG] aoGrids.naos = " << aoGrids.naos << std::endl;
-        std::cout << "[DEBUG] aoGrids.ao = " << (void*)aoGrids.ao << std::endl;
-        std::cout << "[DEBUG] grids.second.size() = " << grids.second.size() << std::endl;
+        // std::cout << "[DEBUG] aoGrids.ngrids = " << aoGrids.ngrids << std::endl;
+        // std::cout << "[DEBUG] aoGrids.naos = " << aoGrids.naos << std::endl;
+        // std::cout << "[DEBUG] aoGrids.ao = " << (void*)aoGrids.ao << std::endl;
+        // std::cout << "[DEBUG] grids.second.size() = " << grids.second.size() << std::endl;
 
         if (aoGrids.ao == nullptr) {
             THROW_EXCEPTION("aoGrids.ao is nullptr! DFT grids not initialized properly.");
@@ -782,7 +782,7 @@ public:
         double* d_ao = nullptr;
         double* d_rho = nullptr;
         size_t ao_size = static_cast<size_t>(aoGrids.ngrids) * static_cast<size_t>(aoGrids.naos);
-        std::cout << "[DEBUG] Allocating GPU memory for AO: " << ao_size * sizeof(double) / (1024.0*1024.0) << " MB" << std::endl;
+        // std::cout << "[DEBUG] Allocating GPU memory for AO: " << ao_size * sizeof(double) / (1024.0*1024.0) << " MB" << std::endl;
 
         cudaError_t err = cudaMalloc((void**)&d_ao, sizeof(double) * ao_size);
         if (err != cudaSuccess) {
@@ -790,20 +790,20 @@ public:
         }
 
         // 检查 aoGrids.ao 的前几个值
-        std::cout << "[DEBUG] First few values of aoGrids.ao:" << std::endl;
-        for (int i = 0; i < std::min(10, (int)ao_size); ++i) {
-            std::cout << "  aoGrids.ao[" << i << "] = " << aoGrids.ao[i] << std::endl;
-        }
+        // std::cout << "[DEBUG] First few values of aoGrids.ao:" << std::endl;
+        // for (int i = 0; i < std::min(10, (int)ao_size); ++i) {
+        //     std::cout << "  aoGrids.ao[" << i << "] = " << aoGrids.ao[i] << std::endl;
+        // }
 
-        std::cout << "[DEBUG] Copying " << ao_size << " doubles from CPU to GPU..." << std::endl;
+        // std::cout << "[DEBUG] Copying " << ao_size << " doubles from CPU to GPU..." << std::endl;
         err = cudaMemcpy(d_ao, aoGrids.ao, sizeof(double) * ao_size, cudaMemcpyHostToDevice);
-        std::cout << "[DEBUG] cudaMemcpy returned: " << cudaGetErrorString(err) << std::endl;
+        // std::cout << "[DEBUG] cudaMemcpy returned: " << cudaGetErrorString(err) << std::endl;
 
         if (err != cudaSuccess) {
             cudaFree(d_ao);
             THROW_EXCEPTION("cudaMemcpy for d_ao failed: " + std::string(cudaGetErrorString(err)));
         }
-        std::cout << "[DEBUG] d_ao = " << (void*)d_ao << " (GPU pointer)" << std::endl;
+        // std::cout << "[DEBUG] d_ao = " << (void*)d_ao << " (GPU pointer)" << std::endl;
 
         // 同步 GPU 并检查是否有之前的错误
         cudaDeviceSynchronize();
@@ -814,8 +814,8 @@ public:
             if (d_rho != nullptr) cudaFree(d_rho);
             THROW_EXCEPTION("CUDA error detected before get_rho: " + std::string(cudaGetErrorString(err)));
         }
-        std::cout << "[DEBUG] No CUDA errors before get_rho" << std::endl;
-
+        // std::cout << "[DEBUG] No CUDA errors before get_rho" << std::endl;
+// 
         // 分配 d_rho 内存
         err = cudaMalloc((void**)&d_rho, sizeof(double) * aoGrids.ngrids);
         if (err != cudaSuccess) {
@@ -832,13 +832,13 @@ public:
         // [第3引数] density_matrix.device_ptr() ... GPU上の密度行列配列へのポインタ(dmに該当)
         // [第4引数] d_ao ... GPU上のAO配列へのポインタ
 
-        std::cout << "[DEBUG] Calling get_rho with:" << std::endl;
-        std::cout << "[DEBUG]   nao (aoGrids.naos) = " << aoGrids.naos << std::endl;
-        std::cout << "[DEBUG]   num_basis_ = " << num_basis_ << std::endl;
-        std::cout << "[DEBUG]   ngrids = " << aoGrids.ngrids << std::endl;
-        std::cout << "[DEBUG]   dm = " << (void*)density_matrix.device_ptr() << std::endl;
-        std::cout << "[DEBUG]   ao = " << (void*)d_ao << std::endl;
-        std::cout << "[DEBUG]   rho = " << (void*)d_rho << std::endl;
+        // std::cout << "[DEBUG] Calling get_rho with:" << std::endl;
+        // std::cout << "[DEBUG]   nao (aoGrids.naos) = " << aoGrids.naos << std::endl;
+        // std::cout << "[DEBUG]   num_basis_ = " << num_basis_ << std::endl;
+        // std::cout << "[DEBUG]   ngrids = " << aoGrids.ngrids << std::endl;
+        // std::cout << "[DEBUG]   dm = " << (void*)density_matrix.device_ptr() << std::endl;
+        // std::cout << "[DEBUG]   ao = " << (void*)d_ao << std::endl;
+        // std::cout << "[DEBUG]   rho = " << (void*)d_rho << std::endl;
 
         // 警告: 如果 num_basis_ != aoGrids.naos，需要使用正确的维度
         if (num_basis_ != aoGrids.naos) {
@@ -873,30 +873,49 @@ public:
         // 检查 d_rho 的前几个值
         std::vector<double> h_rho(aoGrids.ngrids);
         cudaMemcpy(h_rho.data(), d_rho, sizeof(double) * aoGrids.ngrids, cudaMemcpyDeviceToHost);
-        std::cout << "[DEBUG] First 10 values of rho:" << std::endl;
-        for (int i = 0; i < std::min(10, aoGrids.ngrids); ++i) {
-            std::cout << "  rho[" << i << "] = " << h_rho[i] << std::endl;
+
+        // [重要检查] 验证网格点数量和权重数量是否一致
+        std::cout << "[VERIFICATION] Checking grid-weight correspondence:" << std::endl;
+        std::cout << "  aoGrids.ngrids = " << aoGrids.ngrids << std::endl;
+        std::cout << "  weights.size() = " << weights.size() << std::endl;
+        std::cout << "  grids.first.size() = " << grids.first.size() << std::endl;
+
+        if (aoGrids.ngrids != (int)weights.size()) {
+            THROW_EXCEPTION("Grid count mismatch! aoGrids.ngrids=" + std::to_string(aoGrids.ngrids) +
+                          " but weights.size()=" + std::to_string(weights.size()));
+        }
+        if (aoGrids.ngrids != (int)grids.first.size()) {
+            THROW_EXCEPTION("Grid count mismatch! aoGrids.ngrids=" + std::to_string(aoGrids.ngrids) +
+                          " but grids.first.size()=" + std::to_string(grids.first.size()));
         }
 
-        // 检查 weights 的前几个值
-        std::cout << "[DEBUG] First 10 values of weights:" << std::endl;
-        for (int i = 0; i < std::min(10, (int)weights.size()); ++i) {
-            std::cout << "  weights[" << i << "] = " << weights[i] << std::endl;
+        // 打印前几个网格点的信息来验证对应关系
+        std::cout << "[DEBUG] First 5 grid points (coords, weight, rho, ao[0]):" << std::endl;
+        for (int g = 0; g < std::min(5, aoGrids.ngrids); ++g) {
+            double grid_x = grids.first[g][0];
+            double grid_y = grids.first[g][1];
+            double grid_z = grids.first[g][2];
+            double w = weights[g];
+            double rho = h_rho[g];
+            double ao0 = aoGrids.ao[g * aoGrids.naos + 0];  // 第一个基函数在网格点g的值
+
+            std::cout << "  g=" << g << ": coord=(" << grid_x << "," << grid_y << "," << grid_z
+                      << "), w=" << w << ", rho=" << rho << ", ao[0]=" << ao0 << std::endl;
         }
 
         // ---------------------------------------------------- [DFT] Vxc行列の更新 ---------------------------------------------------- //
         // lda.cuのbuild_vxc_matrix()と同じインターフェースにしています！
         // [第4引数] weights ... CPU上のstd::vector (weightsに該当)
 
-        std::cout << "[DEBUG] Calling build_vxc_matrix with:" << std::endl;
-        std::cout << "[DEBUG]   nao (aoGrids.naos) = " << aoGrids.naos << std::endl;
-        std::cout << "[DEBUG]   ngrids = " << aoGrids.ngrids << std::endl;
-        std::cout << "[DEBUG]   weights.size() = " << weights.size() << std::endl;
+        // std::cout << "[DEBUG] Calling build_vxc_matrix with:" << std::endl;
+        // std::cout << "[DEBUG]   nao (aoGrids.naos) = " << aoGrids.naos << std::endl;
+        // std::cout << "[DEBUG]   ngrids = " << aoGrids.ngrids << std::endl;
+        // std::cout << "[DEBUG]   weights.size() = " << weights.size() << std::endl;
 
         // 重要: build_vxc_matrix の第1引数も aoGrids.naos であるべき！
         gpu::build_vxc_matrix(aoGrids.naos, aoGrids.ngrids, d_ao, weights, d_rho, d_V);
 
-        std::cout << "[DEBUG] build_vxc_matrix completed" << std::endl;
+        // std::cout << "[DEBUG] build_vxc_matrix completed" << std::endl;
 
         // 检查 d_J 和 d_V 的前几个值
         std::vector<double> h_J(num_basis_ * num_basis_);
@@ -904,15 +923,15 @@ public:
         cudaMemcpy(h_J.data(), d_J, sizeof(double) * num_basis_ * num_basis_, cudaMemcpyDeviceToHost);
         cudaMemcpy(h_V.data(), d_V, sizeof(double) * num_basis_ * num_basis_, cudaMemcpyDeviceToHost);
 
-        std::cout << "[DEBUG] First few values of J matrix:" << std::endl;
-        for (int i = 0; i < std::min(10, num_basis_ * num_basis_); ++i) {
-            std::cout << "  J[" << i << "] = " << h_J[i] << std::endl;
-        }
+        // std::cout << "[DEBUG] First few values of J matrix:" << std::endl;
+        // for (int i = 0; i < std::min(10, num_basis_ * num_basis_); ++i) {
+        //     std::cout << "  J[" << i << "] = " << h_J[i] << std::endl;
+        // }
 
-        std::cout << "[DEBUG] First few values of V (Vxc) matrix:" << std::endl;
-        for (int i = 0; i < std::min(10, num_basis_ * num_basis_); ++i) {
-            std::cout << "  V[" << i << "] = " << h_V[i] << std::endl;
-        }
+        // std::cout << "[DEBUG] First few values of V (Vxc) matrix:" << std::endl;
+        // for (int i = 0; i < std::min(10, num_basis_ * num_basis_); ++i) {
+        //     std::cout << "  V[" << i << "] = " << h_V[i] << std::endl;
+        // }
 
         cudaFree(d_rho);
         cudaFree(d_ao);

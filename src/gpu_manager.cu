@@ -2626,6 +2626,7 @@ namespace gansu::gpu
             std::cout << std::endl;
         }
         grids = dft::dft_gen_grid(charges, atm_coords);
+        export_grids_to_txt(grids, "dft_grids.txt");
         aoGrids = dft::dft_gen_ao(normed_atom_basis, charges, atm_coords, grids.first);
         // create Grids
     }
