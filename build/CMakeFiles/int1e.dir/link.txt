@@ -1,0 +1,2 @@
+/usr/bin/ar qc libint1e.a CMakeFiles/int1e.dir/src/int1e.cu.o
+/usr/bin/ranlib libint1e.a

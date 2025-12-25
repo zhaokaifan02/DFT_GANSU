@@ -11,7 +11,7 @@
 #  
 # SPDX-License-Identifier: BSD-3-Clause
 # 
-cmake_minimum_required(VERSION 3.28)
+cmake_minimum_required(VERSION 3.22)
 project(GANSU LANGUAGES CUDA CXX)
 
 

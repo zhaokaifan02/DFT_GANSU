@@ -753,10 +753,10 @@ public:
         //*
         // ---------------------------------------------------- [DFT] Vxc計算の部分 (ここから) ----------------------------------------------------------------------------------------------------- //
         // メンバ変数aoGrids(ngrid, ao_cの情報)およびgrids(w_cの情報)を用いて計算してください！
-        double* d_rho = nullptr;
-        cudaMalloc((void**)&d_rho, sizeof(double) * aoGrids.ngrids);
-        cudaMemset(d_rho, 0.0, sizeof(double) * aoGrids.ngrids);
-        std::vector<double>& weights = grids.second;
+        // double* d_rho = nullptr;
+        // cudaMalloc((void**)&d_rho, sizeof(double) * aoGrids.ngrids);
+        // cudaMemset(d_rho, 0.0, sizeof(double) * aoGrids.ngrids);
+        // std::vector<double>& weights = grids.second;
 
 
 
@@ -768,27 +768,105 @@ public:
         // [第4引数] aoGrids.ao ... aoに該当する配列(GPUメモリへのポインタを仮定)
 
 
-        double* d_ao = nullptr;
-        cudaMalloc((void**)&d_ao, sizeof(double)* aoGrids.ngrids * num_basis_);
-        cudaMemcpy(d_ao, aoGrids.ao, sizeof(double)* aoGrids.ngrids * num_basis_, cudaMemcpyHostToDevice);
+        // double* d_ao = nullptr;
+        // cudaMalloc((void**)&d_ao, sizeof(double)* aoGrids.ngrids * num_basis_);
+        // cudaMemcpy(d_ao, aoGrids.ao, sizeof(double)* aoGrids.ngrids * num_basis_, cudaMemcpyHostToDevice);
         
 
-        gpu::get_rho(num_basis_, aoGrids.ngrids, density_matrix.device_ptr(), d_ao, d_rho);
+        // gpu::get_rho(num_basis_, aoGrids.ngrids, density_matrix.device_ptr(), d_ao, d_rho);
 
 
 
 
-        // ---------------------------------------------------- [DFT] Vxc行列の更新 ---------------------------------------------------- //
-        // lda.cuのbuild_vxc_matrix()と同じインターフェースにしています！
-        // [第4引数] weights ... CPU上のstd::vector (weightsに該当)
-        gpu::build_vxc_matrix(num_basis_, aoGrids.ngrids, d_ao, weights, d_rho, d_V);
+        // // ---------------------------------------------------- [DFT] Vxc行列の更新 ---------------------------------------------------- //
+        // // lda.cuのbuild_vxc_matrix()と同じインターフェースにしています！
+        // // [第4引数] weights ... CPU上のstd::vector (weightsに該当)
+        // gpu::build_vxc_matrix(num_basis_, aoGrids.ngrids, d_ao, weights, d_rho, d_V);
 
-        cudaFree(d_rho);
-        cudaFree(d_ao);
+        // cudaFree(d_rho);
+        // cudaFree(d_ao);
         // ---------------------------------------------------- [DFT] Vxc計算の部分 (ここまで) ----------------------------------------------------------------------------------------------------- //
         /**/
 
 
+        //----------------------------------debug------------------------------------------
+        double* d_rho = nullptr;
+        cudaMalloc((void**)&d_rho, sizeof(double) * aoGrids.ngrids);
+        cudaMemset(d_rho, 0.0, sizeof(double) * aoGrids.ngrids);
+        std::vector<double>& weights = grids.second;
+
+        // ---------------------------------------------------- [DFT] rhoの更新 ---------------------------------------------------- //
+        // lda.cuのget_rho()と同じインターフェースにしています！
+        double* d_ao = nullptr;
+        cudaMalloc((void**)&d_ao, sizeof(double)* aoGrids.ngrids * num_basis_);
+        cudaMemcpy(d_ao, aoGrids.ao, sizeof(double)* aoGrids.ngrids * num_basis_, cudaMemcpyHostToDevice);
+        std::cout << "DEBUG: Checking Host aoGrids.ao..." << std::endl;
+        int zero_count = 0;
+        // 检查前 1000 个点
+        for(int i=0; i<1000 * num_basis_; ++i) {
+            if(std::abs(aoGrids.ao[i]) < 1e-12) zero_count++;
+        }
+        std::cout << "DEBUG: First 1000 AO values, Zero count: " << zero_count << std::endl;
+        
+        // 调用 get_rho 计算密度
+        gpu::get_rho(num_basis_, aoGrids.ngrids, density_matrix.device_ptr(), d_ao, d_rho);
+
+        // +++++++++++++++++++++++++++++++ DEBUG START +++++++++++++++++++++++++++++++
+        // 这里的目的是检查输入数据是否正确
+        {
+            std::cout << "\n=== DEBUG: DFT INPUT CHECK ===" << std::endl;
+            
+            // 1. 检查 NAO (应该是 7)
+            std::cout << "DEBUG: num_basis_ (NAO) = " << num_basis_ << std::endl;
+            
+            // 2. 检查 Grid 总数 (应该是 33704)
+            std::cout << "DEBUG: aoGrids.ngrids = " << aoGrids.ngrids << std::endl;
+
+            // 3. 检查 GPU 上的密度矩阵 (dm) - 关键检查点！
+            // 如果这里最后两个对角元是 0，说明 SCF 更新逻辑有问题，而不是 DFT 代码的问题
+            std::vector<double> h_debug_dm(num_basis_ * num_basis_);
+            cudaMemcpy(h_debug_dm.data(), density_matrix.device_ptr(), 
+                       sizeof(double) * num_basis_ * num_basis_, cudaMemcpyDeviceToHost);
+            
+            std::cout << "DEBUG: Density Matrix Diagonal:" << std::endl;
+            double sum_trace = 0.0;
+            for(int i = 0; i < num_basis_; ++i) {
+                double val = h_debug_dm[i * num_basis_ + i]; // 对角元
+                sum_trace += val;
+                std::cout << "  DM[" << i << "," << i << "] = " << val;
+                if(i >= 5 && std::abs(val) < 1e-8) std::cout << "  <--- ERROR: HYDROGEN DM IS ZERO!";
+                std::cout << std::endl;
+            }
+            std::cout << "DEBUG: Trace(DM) = " << sum_trace << " (Should be roughly N_elec/2 = 5.0 for RHF)" << std::endl;
+            
+            // 4. 检查计算出的 rho 数组 - 看看是不是只有前半段有值
+            std::vector<double> h_debug_rho(aoGrids.ngrids);
+            cudaMemcpy(h_debug_rho.data(), d_rho, sizeof(double) * aoGrids.ngrids, cudaMemcpyDeviceToHost);
+            
+            double integrated_elec = 0.0;
+            for(size_t i=0; i<aoGrids.ngrids; ++i) {
+                integrated_elec += h_debug_rho[i] * weights[i];
+            }
+            std::cout << "DEBUG: Manual Integration of d_rho = " << integrated_elec << std::endl;
+            
+            // 检查几个采样点的值
+            std::cout << "DEBUG: Sample rho values:" << std::endl;
+            // 打印前几个点（氧原子附近）
+            for(int i=0; i<5; ++i) 
+                std::cout << "  rho[" << i << "] = " << h_debug_rho[i] << std::endl;
+            // 打印后几个点（氢原子附近，或者是数组末尾）
+            for(int i=aoGrids.ngrids-5; i<aoGrids.ngrids; ++i) 
+                std::cout << "  rho[" << i << "] = " << h_debug_rho[i] << std::endl;
+                
+            std::cout << "=== DEBUG END ===\n" << std::endl;
+        }
+        // +++++++++++++++++++++++++++++++ DEBUG END +++++++++++++++++++++++++++++++
+
+        // ---------------------------------------------------- [DFT] Vxc行列の更新 ---------------------------------------------------- //
+        gpu::build_vxc_matrix(num_basis_, aoGrids.ngrids, d_ao, weights, d_rho, d_V);
+
+        cudaFree(d_rho);
+        cudaFree(d_ao);
 
 
 

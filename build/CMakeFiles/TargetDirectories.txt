@@ -1,0 +1,8 @@
+/home/yejunjie/qc_compute/GANSU/suzuki/GANSU_DFT/build/CMakeFiles/int1e.dir
+/home/yejunjie/qc_compute/GANSU/suzuki/GANSU_DFT/build/CMakeFiles/int2e.dir
+/home/yejunjie/qc_compute/GANSU/suzuki/GANSU_DFT/build/CMakeFiles/int2c2e.dir
+/home/yejunjie/qc_compute/GANSU/suzuki/GANSU_DFT/build/CMakeFiles/int3c2e.dir
+/home/yejunjie/qc_compute/GANSU/suzuki/GANSU_DFT/build/CMakeFiles/gansu.dir
+/home/yejunjie/qc_compute/GANSU/suzuki/GANSU_DFT/build/CMakeFiles/HF_main.dir
+/home/yejunjie/qc_compute/GANSU/suzuki/GANSU_DFT/build/CMakeFiles/edit_cache.dir
+/home/yejunjie/qc_compute/GANSU/suzuki/GANSU_DFT/build/CMakeFiles/rebuild_cache.dir

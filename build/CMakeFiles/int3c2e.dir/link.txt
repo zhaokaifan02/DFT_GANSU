@@ -1,0 +1,2 @@
+/usr/bin/ar qc libint3c2e.a CMakeFiles/int3c2e.dir/src/int3c2e.cu.o
+/usr/bin/ranlib libint3c2e.a

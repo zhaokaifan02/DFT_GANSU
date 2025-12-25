@@ -1101,37 +1101,50 @@ namespace gansu::dft
 
     std::pair<std::vector<std::array<double, 3>>, std::vector<double>> dft_gen_grid(std::vector<int> charges, std::vector<std::array<double, 3>> atm_coords)
     {
+        // 1. 获取唯一的原子序数
         std::vector<int> atom_nuc = unique_Z(charges);
         std::vector<double> x, y, z, w;
         std::vector<int> atom_id;
 
+        // 2. 生成原子网格模板
         chemgrid::gen_atom_grid(x, y, z, w, atom_id, atom_nuc,
                                 chemgrid::RadialMethod::TreutlerAhlrichs, 3,
                                 chemgrid::PruningMethod::NWChem);
+        
+        // 3. 分组 (注意：根据您的日志，这里的 grouped Key 已经是 Z 了，即 8, 1)
         auto grouped = group_by_atom(x, y, z, w, atom_id);
-        for (const auto &kv : grouped)
-        {
-            int atom = kv.first;
-            const auto &points = kv.second;
+
+        // [调试打印] 确认 Key 的值
+        printf("DEBUG: Grouped Map Keys:\n");
+        for (const auto &kv : grouped) {
+            // 修正点1: grid_data 是 vector，直接用 .size()，不要加 .x
+            printf("  Key: %d -> Points: %lu\n", kv.first, kv.second.size());
         }
-        // becke
+
+        // 4. Becke Partitioning
+        // 直接传入 grouped，因为 charges (Z) 和 grouped Key (Z) 是一致的
         chemgrid::PartitionOut part;
         part = chemgrid::get_partition(
             atm_coords, grouped, charges,
             chemgrid::constants::BRAGG_RADII_ANG);
 
-        // reorder
+        // 5. 后处理与重排序
         std::vector<int> atm_idx;
         std::vector<double> quadrature_weights;
+        
         chemgrid::build_atm_idx_and_weights_by_Z(grouped, charges, part.first, part.second, atm_idx, quadrature_weights);
+        
         std::vector<size_t> idx = chemgrid::arg_group_grids_cpu(part.first, atm_coords,
                                                                 chemgrid::constants::GROUP_BOX_SIZE,          // 1.2
                                                                 chemgrid::constants::GROUP_BOUNDARY_PENALTY); // 4.2
+                                                                
         chemgrid::reorder_by_index_inplace(idx, part.first);
         chemgrid::reorder_by_index_inplace(idx, part.second);
         chemgrid::reorder_by_index_inplace(idx, atm_idx);
         chemgrid::reorder_by_index_inplace(idx, quadrature_weights);
+        
         chemgrid::pad_grids_cpp(part.first, part.second, atm_idx, quadrature_weights, chemgrid::constants::ALIGNMENT_UNIT);
+        
         return {part.first, part.second};
     }
 
@@ -1786,33 +1799,69 @@ namespace gansu::dft
         std::cout << "Exported AO gradients (3 x " << ngrids << " x " << nao << ") to " << filename << std::endl;
     }
 
-    AOGrids dft_gen_ao(std::map<int, std::vector<atom_AO>> normed_bas, std::vector<int> charges, std::vector<std::array<double, 3>> &atm_coords, std::vector<std::array<double, 3>> coords)
+    AOGrids dft_gen_ao(std::map<int, std::vector<atom_AO>> normed_bas, 
+                   std::vector<int> charges, 
+                   std::vector<std::array<double, 3>> &atm_coords, 
+                   std::vector<std::array<double, 3>> coords)
     {
-
-        for (auto it = normed_bas.begin(); it != normed_bas.end(); ++it)
-        {
-            std::cout << it->first << std::endl; // 输出键
+        std::cout << "\n=== DEBUG: Inside dft_gen_ao ===" << std::endl;
+        
+        // 1. 检查 map 的大小
+        std::cout << "DEBUG: normed_bas size = " << normed_bas.size() << std::endl;
+        for (auto it = normed_bas.begin(); it != normed_bas.end(); ++it) {
+            std::cout << "  -> Atom Index: " << it->first 
+                    << " has " << it->second.size() << " AO shells." << std::endl;
         }
 
+        // 2. 生成 AO 描述符
         std::vector<AODesc> AODESC = generate_ao_list(normed_bas, charges, atm_coords);
+        
         int ngrids = static_cast<int>(coords.size());
         int nao = static_cast<int>(AODESC.size());
-        printf("Total AO count: %d\n", nao);
-        printf("values size: %d x %d \n", ngrids, nao);
+        
+        printf("DEBUG: Total AO count (nao) from AODESC: %d\n", nao);
+        printf("DEBUG: Grid count (ngrids): %d\n", ngrids);
+        
+        // [CRITICAL CHECK] 必须确保这里的 nao 和外层 compute_fock_matrix 的 num_basis_ (7) 一致
+        if (nao != 7) { 
+            printf("!!! WARNING !!! nao (%d) does not match expected (7) for Water STO-3G!\n", nao);
+            printf("This implies generate_ao_list failed to process Hydrogen atoms.\n");
+        }
+
+        // 3. 检查 AODESC 的内容 (由于不知道结构体成员名，暂时注释掉坐标打印)
+        /*
+        if (!AODESC.empty()) {
+            std::cout << "DEBUG: Checking AODESC centers (Skipped due to member name mismatch)" << std::endl;
+        }
+        */
+
+        // 4. 分配 Host 内存
+        // 注意：这里必须初始化为 0
         double *ao_values = new double[ngrids * nao];
-        // printf("Evaluating AOs on grids using GPU...\n");
-        // chemgrid::evaluate_aos_on_grids_gpu_raw(AODESC, atm_coords, coords, ao_values, ngrids, nao);
+        std::memset(ao_values, 0, sizeof(double) * ngrids * nao);
+
+        // 5. 调用 GPU 计算核心
+        printf("DEBUG: Launching chemgrid::evaluate_aos_gpu_shell_grouped...\n");
         chemgrid::evaluate_aos_gpu_shell_grouped(AODESC, atm_coords, coords, ao_values, ngrids, nao);
-        double *out_grad = new double[3 * ngrids * nao];
-        // printf("Evaluating AO gradients on grids using CPU...\n");
-        // evaluate_ao_grad(AODESC, atm_coords, coords, out_grad, ngrids, nao);
-        // // EXPORT TO TXT FOR DEBUGGING
-        // export_ao_values_to_txt(ao_values, ngrids, nao, "ao_values.txt");
-        // export_ao_grad_to_txt(out_grad, ngrids, nao, "ao_gradients.txt");
+        
+        // 6. 立即检查计算结果 (Host 端)
+        int zero_check_count = 0;
+        // 只检查前 1000 个非零位置（避免全零被误判，或者检查前 ngrids * 1）
+        int check_limit = std::min(ngrids * nao, 5000); 
+        for(int i=0; i<check_limit; ++i) {
+            if(std::abs(ao_values[i]) < 1e-20) zero_check_count++;
+        }
+        printf("DEBUG: Post-Compute check - First %d values, Zero count: %d\n", check_limit, zero_check_count);
+
+        // 梯度计算暂时注释
+        double *out_grad = nullptr; 
+        
         AOGrids outAO;
         outAO.ao = ao_values;
         outAO.naos = nao;
         outAO.ngrids = ngrids;
+        
+        std::cout << "=== DEBUG: dft_gen_ao END ===\n" << std::endl;
         return outAO;
     }
 

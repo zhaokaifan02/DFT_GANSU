@@ -2566,70 +2566,130 @@ namespace gansu::gpu
                                      std::string(cudaGetErrorString(err)));
     }
 
-    void build_vxc_matrix(const int nao, const int ngrids, const double *d_ao, std::vector<double> &weights_vector, double *d_rho, double *d_V)
+    void build_vxc_matrix(const int nao, const int ngrids,
+                      const double *d_ao,
+                      std::vector<double> &weights_vector,
+                      double *d_rho,
+                      double *d_V)
     {
+        // 1. 基础检查
         if (weights_vector.size() != static_cast<size_t>(ngrids))
             throw std::invalid_argument("weights_vector.size() != ngrids");
 
+        // 2. 显存规划
         size_t free_byte = 0, total_byte = 0;
         CUDA_CHECK(cudaMemGetInfo(&free_byte, &total_byte));
+        
         const size_t SAFE_FREE = static_cast<size_t>(free_byte * 0.9);
-        const size_t aux_buf = 64 * 1024 * 1024;
-        const size_t per_row = (nao + 3) * sizeof(double);
+        const size_t aux_buf   = 64 * 1024 * 1024;
+        
+        // 【修正】这里应该是 nao + 4 (ao, w, rho, vxc, exc)
+        const size_t per_row   = (nao + 4) * sizeof(double); 
+        
         const size_t left_byte = (SAFE_FREE > aux_buf) ? (SAFE_FREE - aux_buf) : 0;
         if (left_byte == 0)
             throw std::runtime_error("Not enough GPU memory to tile build_vxc_matrix!");
 
         size_t block_rows = left_byte / per_row;
-        if (block_rows < 1)
-            block_rows = 1;
-        if (block_rows > ngrids)
-            block_rows = ngrids;
+        if (block_rows < 1) block_rows = 1;
+        if (block_rows > ngrids) block_rows = ngrids;
 
-        double *d_ao_b = nullptr;
-        double *d_w_b = nullptr;
+        // 3. 分配显存
+        double *d_ao_b  = nullptr;
+        double *d_w_b   = nullptr;
         double *d_rho_b = nullptr;
         double *d_vxc_b = nullptr;
-        CUDA_CHECK(cudaMalloc(&d_ao_b, block_rows * nao * sizeof(double)));
-        CUDA_CHECK(cudaMalloc(&d_w_b, block_rows * sizeof(double)));
+        double *d_exc_b = nullptr;
+
+        CUDA_CHECK(cudaMalloc(&d_ao_b,  block_rows * nao * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_w_b,   block_rows * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_rho_b, block_rows * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_vxc_b, block_rows * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_exc_b, block_rows * sizeof(double)));
 
+        // 4. 初始化 V 矩阵 (累加前清零)
         const size_t mat_size = static_cast<size_t>(nao) * nao * sizeof(double);
         CUDA_CHECK(cudaMemset(d_V, 0, mat_size));
 
+        // 5. 累加变量
+        double exc_total  = 0.0; // 交换关联能
+        double total_elec = 0.0; // 【诊断变量】电子总数积分
+
         const int BLOCK = 256;
+
+        // 6. 循环处理 Grid
         for (int g0 = 0; g0 < ngrids; g0 += block_rows)
         {
             int g1 = std::min(g0 + static_cast<int>(block_rows), ngrids);
             int rows = g1 - g0;
 
+            // --- H2D 拷贝 ---
             CUDA_CHECK(cudaMemcpyAsync(d_ao_b, d_ao + static_cast<size_t>(g0) * nao,
-                                       rows * nao * sizeof(double),
-                                       cudaMemcpyDeviceToDevice));
+                                    rows * nao * sizeof(double), cudaMemcpyDeviceToDevice));
             CUDA_CHECK(cudaMemcpyAsync(d_rho_b, d_rho + g0,
-                                       rows * sizeof(double),
-                                       cudaMemcpyDeviceToDevice));
+                                    rows * sizeof(double), cudaMemcpyDeviceToDevice));
             CUDA_CHECK(cudaMemcpyAsync(d_w_b, weights_vector.data() + g0,
-                                       rows * sizeof(double),
-                                       cudaMemcpyHostToDevice));
+                                    rows * sizeof(double), cudaMemcpyHostToDevice));
 
+            // --- Kernel: 计算 LDA Vxc 和 Exc ---
+            // 假设 d_exc_b 输出的是 epsilon_xc * rho (能量密度)
+            // 或者 epsilon_xc (平均能量)。通常 Libxc 输出的是 epsilon。
+            // 根据你的测试结果，不乘 rho 偏小，乘 rho 巨大，这说明 kernel 输出的大概率是 epsilon * rho。
+            // 但为了诊断，我们先按标准做法：
             int grid_g = (rows + BLOCK - 1) / BLOCK;
-            lda_exc_vxc_kernel<<<grid_g, BLOCK>>>(rows, d_rho_b, nullptr, d_vxc_b, 0.0);
+            lda_exc_vxc_kernel<<<grid_g, BLOCK>>>(rows, d_rho_b, d_exc_b, d_vxc_b, 0.0);
             CUDA_CHECK(cudaGetLastError());
 
+            // --- D2H 回传 (为了积分) ---
+            std::vector<double> h_exc(rows);
+            std::vector<double> h_rho(rows); // 我们把密度也读回来检查电子数
+
+            CUDA_CHECK(cudaMemcpy(h_exc.data(), d_exc_b, rows * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(h_rho.data(), d_rho_b, rows * sizeof(double), cudaMemcpyDeviceToHost));
+            
+            // --- CPU 积分 ---
+            for (int ig = 0; ig < rows; ++ig)
+            {
+                double w = weights_vector[g0 + ig];
+                
+                // 积分1: 能量 Exc
+                // 注意：如果 h_exc 是能量密度，直接 * w。如果是平均能量，需要 * rho * w。
+                // 这里我们先用你第一版的公式 (看起来更接近正确量级)
+                exc_total += h_exc[ig] * w; 
+
+                // 积分2: 【关键诊断】电子数
+                // 如果这个算出来不对，说明 Grid 权重彻底错了
+                total_elec += h_rho[ig] * w;
+            }
+
+            // --- Kernel: 构建 Vxc 矩阵 ---
             int N = rows * nao;
             int grid = (N + BLOCK - 1) / BLOCK;
             build_vxc_matrix_kernel<<<grid, BLOCK>>>(
                 nao, rows, g0, d_ao_b, d_w_b, d_vxc_b, d_V);
             CUDA_CHECK(cudaGetLastError());
-            CUDA_CHECK(cudaDeviceSynchronize());
         }
 
+        // --- 7. 【关键诊断】检查生成的 V 矩阵是否为空 ---
+        std::vector<double> h_V(nao * nao);
+        CUDA_CHECK(cudaMemcpy(h_V.data(), d_V, mat_size, cudaMemcpyDeviceToHost));
+        
+        double v_norm = 0.0;
+        for (double val : h_V) v_norm += std::abs(val);
+
+        // --- 8. 打印完整诊断信息 ---
+        std::cout << "--------------------------------------------------" << std::endl;
+        std::cout << "[DFT DIANOSTIC] Integration Results:" << std::endl;
+        std::cout << "  > Integrated Electrons : " << std::fixed << std::setprecision(6) << total_elec << " (Should be close to N_elec)" << std::endl;
+        std::cout << "  > LDA E_xc             : " << std::setprecision(10) << exc_total << " a.u." << std::endl;
+        std::cout << "  > Vxc Matrix Norm (L1) : " << std::setprecision(6) << v_norm << " (Should NOT be 0.0)" << std::endl;
+        std::cout << "--------------------------------------------------" << std::endl;
+
+        // 9. 释放资源
         CUDA_CHECK(cudaFree(d_ao_b));
         CUDA_CHECK(cudaFree(d_w_b));
         CUDA_CHECK(cudaFree(d_rho_b));
         CUDA_CHECK(cudaFree(d_vxc_b));
+        CUDA_CHECK(cudaFree(d_exc_b));
     }
-
 } // namespace gansu::gpu
