@@ -62,6 +62,7 @@ void computeFockMatrix_UHF(const real_t* d_density_matrix_a, const real_t* d_den
 void computeFockMatrix_ROHF(const real_t* d_density_matrix_closed, const real_t* d_density_matrix_open, const real_t* d_core_hamiltonian_matrix, const real_t* d_coefficient_matrix, const real_t* d_overlap_matrix, const real_t* d_eri, const ROHF_ParameterSet ROH_parameters, real_t* d_fock_matrix_closed, real_t* d_fock_matrix_open, real_t* d_fock_matrix, const int num_closed, const int num_open, const int num_basis);
 
 real_t computeEnergy_RHF(const real_t* d_density_matrix, const real_t* d_core_hamiltonian_matrix, const real_t* d_fock_matrix, const int num_basis);
+real_t computeEnergy_DFT_RHF(const real_t* d_density_matrix, const real_t* d_core_hamiltonian_matrix, const real_t* d_J_matrix, const real_t E_xc, const int num_basis);
 real_t computeEnergy_UHF(const real_t* d_density_matrix_a, const real_t* d_density_matrix_b, const real_t* d_core_hamiltonian_matrix, const real_t* d_fock_matrix_a, const real_t* d_fock_matrix_b, const int num_basis);
 real_t computeEnergy_ROHF(const real_t* d_density_matrix_closed, const real_t* d_density_matrix_open, const real_t* d_core_hamiltonian_matrix, const real_t* d_fock_matrix_closed, const real_t* d_fock_matrix_open, const int num_basis);
 
@@ -106,7 +107,7 @@ void computeKMatrix_DFT_RHF(const real_t* d_density_matrix, real_t* d_K_matrix, 
 void build(const Atom* h_atoms,const int nAtom, const PrimitiveShell *shells_ptr,int bsisnum,AOGrids& aoGrids, std::pair<std::vector<std::array<double, 3>>,std::vector<double>>& grids);
 void get_rho(const int num_basis, const int ngrids, const double* d_dm, const double* d_ao, double* d_rho);
 void initialize_vwn_params();  // Initialize VWN parameters in constant memory
-void build_vxc_matrix(const int num_basis, const int ngrids, const double* d_ao, std::vector<double>& weights_vector, double* d_rho, double* d_V);
+double build_vxc_matrix(const int num_basis, const int ngrids, const double* d_ao, std::vector<double>& weights_vector, double* d_rho, double* d_V);  // Returns E_xc
 
 
 /**

@@ -1805,7 +1805,17 @@ namespace gansu::dft
         // chemgrid::evaluate_aos_gpu_shell_grouped(AODESC, atm_coords, coords, ao_values, ngrids, nao);
         double *out_grad = new double[3 * ngrids * nao];
         // printf("Evaluating AO gradients on grids using CPU...\n");
+        auto start = std::chrono::high_resolution_clock::now();
         evaluate_ao_grad(AODESC, atm_coords, coords, out_grad, ngrids, nao);
+        // 结束计时
+        auto end = std::chrono::high_resolution_clock::now();
+
+        // 计算时间差
+        std::chrono::duration<double> elapsed = end - start;
+
+        // 输出时间
+        std::cout << "Elapsed time ao grid: " << elapsed.count()*1000 << " ms" << std::endl;
+
         // chemgrid::evaluate_aos_grad_gpu_shell_grouped(AODESC, atm_coords, coords, out_grad, ngrids, nao);
         // // EXPORT TO TXT FOR DEBUGGING
         export_ao_values_to_txt(ao_values, ngrids, nao, "ao_values.txt");

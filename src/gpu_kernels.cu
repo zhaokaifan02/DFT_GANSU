@@ -672,6 +672,8 @@ namespace gansu::gpu
         int mu = id / num_basis, nu = id % num_basis;
         size_t idx_JK = (mu <= nu) ? mu * num_basis + nu : nu * num_basis + mu;
 
+        // DFT Fock matrix: F = H + J + Vxc
+        // Note: d_K_matrix contains Vxc in DFT mode, and J already includes factor of 2 from density matrix (D=2*C*C^T)
         d_Fock_matrix[id] = d_core_hamiltonian_matrix[id] + d_J_matrix[idx_JK] + d_K_matrix[idx_JK];
     }
 

@@ -242,6 +242,22 @@ void RHF::compute_density_matrix() {
         num_electrons,
         num_basis
     );
+
+    // [DIAGNOSTIC] Check Tr(D*S) = number of electrons
+    static int check_count = 0;
+    if (check_count < 10) {
+        density_matrix.toHost();
+        const DeviceHostMatrix<real_t>& S = get_overlap_matrix();
+        double trace_DS = 0.0;
+        for (int i = 0; i < num_basis; i++) {
+            for (int j = 0; j < num_basis; j++) {
+                trace_DS += density_matrix(i, j) * S(i, j);
+            }
+        }
+        std::cout << "[DENSITY CHECK] Tr(D*S) = " << trace_DS << " (should be " << num_electrons << ")" << std::endl;
+        check_count++;
+    }
+
 /*
     { // nan check
         density_matrix.toHost();
@@ -286,12 +302,39 @@ void RHF::compute_density_matrix() {
 void RHF::compute_energy(){
     PROFILE_FUNCTION();
 
-    energy_ = gpu::computeEnergy_RHF(
-        density_matrix.device_ptr(),
-        core_hamiltonian_matrix.device_ptr(),
-        fock_matrix.device_ptr(),
-        num_basis
-    );
+    // Check if using DFT method
+    ERI_DFT_RHF* dft_eri = dynamic_cast<ERI_DFT_RHF*>(eri_method_.get());
+
+    if (dft_eri != nullptr) {
+        // Print density matrix diagonal for debugging (always print for last iteration)
+        static int call_count = 0;
+        call_count++;
+
+        density_matrix.toHost();
+        std::cout << "\n[DEBUG Iter " << call_count << "] Density matrix diagonal: [";
+        for (int i = 0; i < num_basis; i++) {
+            std::cout << density_matrix(i, i);
+            if (i < num_basis - 1) std::cout << ", ";
+        }
+        std::cout << "]" << std::endl;
+
+        // DFT energy calculation: E = Tr(D*H) + 0.5*Tr(D*J) + E_xc
+        energy_ = gpu::computeEnergy_DFT_RHF(
+            density_matrix.device_ptr(),
+            core_hamiltonian_matrix.device_ptr(),
+            dft_eri->get_J_matrix(),  // Access the saved J matrix
+            dft_eri->get_exc_energy(),  // Get E_xc
+            num_basis
+        );
+    } else {
+        // HF energy calculation: E = 0.5 * (Tr(D*H) + Tr(D*F))
+        energy_ = gpu::computeEnergy_RHF(
+            density_matrix.device_ptr(),
+            core_hamiltonian_matrix.device_ptr(),
+            fock_matrix.device_ptr(),
+            num_basis
+        );
+    }
 
     if(verbose){
         std::cout << "Energy: " << energy_ << std::endl;

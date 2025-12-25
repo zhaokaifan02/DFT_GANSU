@@ -836,6 +836,40 @@ namespace gansu::gpu
     }
 
     /**
+     * @brief Compute the energy for DFT with RHF.
+     * @param d_density_matrix Device pointer to the density matrix
+     * @param d_core_hamiltonian_matrix Device pointer to the core Hamiltonian matrix
+     * @param d_J_matrix Device pointer to the Coulomb matrix
+     * @param E_xc Exchange-correlation energy
+     * @param num_basis Number of basis functions
+     * @return Electronic energy (excluding nuclear repulsion)
+     * @details DFT energy: E = Tr(D*H) + 0.5*Tr(D*J) + E_xc
+     */
+    real_t computeEnergy_DFT_RHF(const real_t *d_density_matrix, const real_t *d_core_hamiltonian_matrix, const real_t *d_J_matrix, const real_t E_xc, const int num_basis)
+    {
+        real_t energy = 0.0;
+
+        // Tr(D*H)
+        real_t E_core = innerProduct(d_density_matrix, d_core_hamiltonian_matrix, num_basis * num_basis);
+        energy += E_core;
+
+        // 0.5 * Tr(D*J)
+        real_t E_J = 0.5 * innerProduct(d_density_matrix, d_J_matrix, num_basis * num_basis);
+        energy += E_J;
+
+        // E_xc
+        energy += E_xc;
+
+        std::cout << "[Energy Breakdown]" << std::endl;
+        std::cout << "  Tr(D*H)      = " << E_core << std::endl;
+        std::cout << "  0.5*Tr(D*J)  = " << E_J << std::endl;
+        std::cout << "  E_xc         = " << E_xc << std::endl;
+        std::cout << "  Total (elec) = " << energy << std::endl;
+
+        return energy;
+    }
+
+    /**
      * @brief Compute the energy for the unrestricted HF.
      * @param d_density_matrix_a Device pointer to the density matrix for the alpha spin
      * @param d_density_matrix_b Device pointer to the density matrix for the beta spin
@@ -2656,7 +2690,7 @@ namespace gansu::gpu
                                      std::string(cudaGetErrorString(err)));
     }
 
-    void build_vxc_matrix(const int nao, const int ngrids, const double *d_ao, std::vector<double> &weights_vector, double *d_rho, double *d_V)
+    double build_vxc_matrix(const int nao, const int ngrids, const double *d_ao, std::vector<double> &weights_vector, double *d_rho, double *d_V)
     {
         // Initialize VWN parameters in constant memory (if not already done)
         initialize_vwn_params();
@@ -2668,7 +2702,7 @@ namespace gansu::gpu
         CUDA_CHECK(cudaMemGetInfo(&free_byte, &total_byte));
         const size_t SAFE_FREE = static_cast<size_t>(free_byte * 0.9);
         const size_t aux_buf = 64 * 1024 * 1024;
-        const size_t per_row = (nao + 3) * sizeof(double);
+        const size_t per_row = (nao + 4) * sizeof(double);  // +4 for exc buffer
         const size_t left_byte = (SAFE_FREE > aux_buf) ? (SAFE_FREE - aux_buf) : 0;
         if (left_byte == 0)
             throw std::runtime_error("Not enough GPU memory to tile build_vxc_matrix!");
@@ -2683,13 +2717,20 @@ namespace gansu::gpu
         double *d_w_b = nullptr;
         double *d_rho_b = nullptr;
         double *d_vxc_b = nullptr;
+        double *d_exc_b = nullptr;
         CUDA_CHECK(cudaMalloc(&d_ao_b, block_rows * nao * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_w_b, block_rows * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_rho_b, block_rows * sizeof(double)));
         CUDA_CHECK(cudaMalloc(&d_vxc_b, block_rows * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_exc_b, block_rows * sizeof(double)));
 
         const size_t mat_size = static_cast<size_t>(nao) * nao * sizeof(double);
         CUDA_CHECK(cudaMemset(d_V, 0, mat_size));
+
+        double E_xc_total = 0.0;  // Total exchange-correlation energy
+        double n_electrons = 0.0;  // Integrated electron count
+        std::vector<double> h_exc_b(block_rows);
+        std::vector<double> h_rho_b(block_rows);
 
         const int BLOCK = 256;
         for (int g0 = 0; g0 < ngrids; g0 += block_rows)
@@ -2708,7 +2749,7 @@ namespace gansu::gpu
                                        cudaMemcpyHostToDevice));
 
             int grid_g = (rows + BLOCK - 1) / BLOCK;
-            lda_exc_vxc_kernel<<<grid_g, BLOCK>>>(rows, d_rho_b, nullptr, d_vxc_b, 0.0);
+            lda_exc_vxc_kernel<<<grid_g, BLOCK>>>(rows, d_rho_b, d_exc_b, d_vxc_b, 0.0);
             CUDA_CHECK(cudaGetLastError());
 
             int N = rows * nao;
@@ -2717,12 +2758,40 @@ namespace gansu::gpu
                 nao, rows, g0, d_ao_b, d_w_b, d_vxc_b, d_V);
             CUDA_CHECK(cudaGetLastError());
             CUDA_CHECK(cudaDeviceSynchronize());
+
+            // Compute E_xc for this block: E_xc = sum(w * exc)
+            // Note: exc[g] already contains rho*epsilon_xc, so we just multiply by weight
+            CUDA_CHECK(cudaMemcpy(h_exc_b.data(), d_exc_b, rows * sizeof(double), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(h_rho_b.data(), d_rho_b, rows * sizeof(double), cudaMemcpyDeviceToHost));
+
+            // Debug: print first few values
+            if (g0 == 0) {
+                std::cout << "[E_xc DEBUG] First 5 grid points:" << std::endl;
+                for (int i = 0; i < std::min(5, rows); ++i) {
+                    std::cout << "  g=" << i << ": rho=" << h_rho_b[i]
+                              << ", exc=" << h_exc_b[i]
+                              << ", w=" << weights_vector[g0 + i]
+                              << ", contribution=" << (weights_vector[g0 + i] * h_exc_b[i])
+                              << std::endl;
+                }
+            }
+
+            for (int i = 0; i < rows; ++i)
+            {
+                E_xc_total += weights_vector[g0 + i] * h_exc_b[i];
+                n_electrons += weights_vector[g0 + i] * h_rho_b[i];
+            }
         }
 
         CUDA_CHECK(cudaFree(d_ao_b));
         CUDA_CHECK(cudaFree(d_w_b));
         CUDA_CHECK(cudaFree(d_rho_b));
         CUDA_CHECK(cudaFree(d_vxc_b));
+        CUDA_CHECK(cudaFree(d_exc_b));
+
+        std::cout << "[DFT DIAGNOSTIC] Integrated electron count: " << n_electrons << " (should be 10.0 for H2O)" << std::endl;
+
+        return E_xc_total;
     }
 
 } // namespace gansu::gpu

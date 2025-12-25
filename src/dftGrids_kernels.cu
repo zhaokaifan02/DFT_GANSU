@@ -1518,12 +1518,10 @@ namespace gansu::dft::chemgrid
             ao_grad[0 * (ngrids * nao) + bpx] = ce + ce_2a * dx * dx;
             ao_grad[1 * (ngrids * nao) + bpx] = ce_2a * dy * dx;
             ao_grad[2 * (ngrids * nao) + bpx] = ce_2a * dz * dx;
-
             // py = ce*dy
             ao_grad[0 * (ngrids * nao) + bpy] = ce_2a * dx * dy;
             ao_grad[1 * (ngrids * nao) + bpy] = ce + ce_2a * dy * dy;
             ao_grad[2 * (ngrids * nao) + bpy] = ce_2a * dz * dy;
-
             // pz = ce*dz
             ao_grad[0 * (ngrids * nao) + bpz] = ce_2a * dx * dz;
             ao_grad[1 * (ngrids * nao) + bpz] = ce_2a * dy * dz;

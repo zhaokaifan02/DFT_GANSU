@@ -702,9 +702,20 @@ protected:
 
 class ERI_DFT_RHF : public ERI_DFT {
 public:
-    ERI_DFT_RHF(RHF& rhf): ERI_DFT(rhf), rhf_(rhf) {} ///< Constructor
+    ERI_DFT_RHF(RHF& rhf): ERI_DFT(rhf), rhf_(rhf), E_xc_(0.0), d_J_(nullptr) {} ///< Constructor
     ERI_DFT_RHF(const ERI_DFT_RHF&) = delete; ///< copy constructor is deleted
-    ~ERI_DFT_RHF() = default; ///< destructor
+    ~ERI_DFT_RHF() {
+        if (d_J_ != nullptr) {
+            cudaFree(d_J_);
+            d_J_ = nullptr;
+        }
+    } ///< destructor
+
+    /// Get exchange-correlation energy
+    double get_exc_energy() const { return E_xc_; }
+
+    /// Get J matrix device pointer (for DFT energy calculation)
+    double* get_J_matrix() const { return d_J_; }
 
     void compute_fock_matrix() override {
         const DeviceHostMatrix<real_t>& density_matrix = rhf_.get_density_matrix();
@@ -719,6 +730,11 @@ public:
 
         const std::vector<ShellPairTypeInfo>& shell_pair_type_infos = hf_.get_shell_pair_type_infos();
 
+        // Free previous d_J_ if exists
+        if (d_J_ != nullptr) {
+            cudaFree(d_J_);
+            d_J_ = nullptr;
+        }
 
         real_t *d_J, *d_V;
         cudaMalloc((void**)&d_J, sizeof(real_t) * num_basis_ * num_basis_);
@@ -913,7 +929,10 @@ public:
         // std::cout << "[DEBUG]   weights.size() = " << weights.size() << std::endl;
 
         // 重要: build_vxc_matrix の第1引数も aoGrids.naos であるべき！
-        gpu::build_vxc_matrix(aoGrids.naos, aoGrids.ngrids, d_ao, weights, d_rho, d_V);
+        // Compute Vxc matrix and get exchange-correlation energy E_xc
+        E_xc_ = gpu::build_vxc_matrix(aoGrids.naos, aoGrids.ngrids, d_ao, weights, d_rho, d_V);
+
+        std::cout << "[DFT DEBUG] Exchange-correlation energy E_xc = " << E_xc_ << std::endl;
 
         // std::cout << "[DEBUG] build_vxc_matrix completed" << std::endl;
 
@@ -923,15 +942,41 @@ public:
         cudaMemcpy(h_J.data(), d_J, sizeof(double) * num_basis_ * num_basis_, cudaMemcpyDeviceToHost);
         cudaMemcpy(h_V.data(), d_V, sizeof(double) * num_basis_ * num_basis_, cudaMemcpyDeviceToHost);
 
-        // std::cout << "[DEBUG] First few values of J matrix:" << std::endl;
-        // for (int i = 0; i < std::min(10, num_basis_ * num_basis_); ++i) {
-        //     std::cout << "  J[" << i << "] = " << h_J[i] << std::endl;
-        // }
+        // 打印Vxc矩阵的完整内容（7x7矩阵）
+        std::cout << "\n[DFT DEBUG] Complete Vxc matrix:" << std::endl;
+        for (int i = 0; i < num_basis_; ++i) {
+            std::cout << "  [";
+            for (int j = 0; j < num_basis_; ++j) {
+                std::cout << std::setw(12) << std::setprecision(6) << std::fixed << h_V[i * num_basis_ + j];
+                if (j < num_basis_ - 1) std::cout << ", ";
+            }
+            std::cout << "]" << std::endl;
+        }
 
-        // std::cout << "[DEBUG] First few values of V (Vxc) matrix:" << std::endl;
-        // for (int i = 0; i < std::min(10, num_basis_ * num_basis_); ++i) {
-        //     std::cout << "  V[" << i << "] = " << h_V[i] << std::endl;
-        // }
+        // 计算Vxc矩阵的一些统计量
+        double vxc_trace = 0.0;
+        double vxc_sum = 0.0;
+        for (int i = 0; i < num_basis_; ++i) {
+            vxc_trace += h_V[i * num_basis_ + i];
+            for (int j = 0; j < num_basis_; ++j) {
+                vxc_sum += h_V[i * num_basis_ + j];
+            }
+        }
+        std::cout << "[DFT DEBUG] Vxc matrix statistics:" << std::endl;
+        std::cout << "  Trace(Vxc) = " << vxc_trace << std::endl;
+        std::cout << "  Sum(Vxc)   = " << vxc_sum << std::endl;
+
+        // 同样打印 J 矩阵作为对比
+        std::cout << "\n[DFT DEBUG] Complete J matrix:" << std::endl;
+        for (int i = 0; i < num_basis_; ++i) {
+            std::cout << "  [";
+            for (int j = 0; j < num_basis_; ++j) {
+                std::cout << std::setw(12) << std::setprecision(6) << std::fixed << h_J[i * num_basis_ + j];
+                if (j < num_basis_ - 1) std::cout << ", ";
+            }
+            std::cout << "]" << std::endl;
+        }
+        std::cout << std::endl;
 
         cudaFree(d_rho);
         cudaFree(d_ao);
@@ -951,8 +996,8 @@ public:
         gpu::computeFockMatrix_DFT_kernel<<< num_blocks, threads_per_block >>>(core_hamiltonian_matrix.device_ptr(), d_J, d_V, fock_matrix.device_ptr(), num_basis_);
         cudaDeviceSynchronize();
 
-
-        cudaFree(d_J);
+        // Save d_J for DFT energy calculation, free d_V
+        d_J_ = d_J;  // Save J matrix for energy calculation
         cudaFree(d_V);
 
 
@@ -982,6 +1027,8 @@ public:
 
 protected:
     RHF& rhf_; ///< RHF
+    double E_xc_; ///< Exchange-correlation energy
+    double* d_J_; ///< Device pointer to J matrix (for DFT energy calculation)
 };
 
 
